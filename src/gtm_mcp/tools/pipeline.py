@@ -149,23 +149,27 @@ async def pipeline_gather_and_scrape(
         if funding_stages:
             gather_tasks.append(search_one("industry", tag_id, funded=True))
 
+    _gather_completed_at: list = []  # mutable container for closure
+
     async def run_gather():
         await asyncio.gather(*gather_tasks, return_exceptions=True)
-        gather_done.set()
+        _gather_completed_at.append(datetime.now(timezone.utc))  # FIX #3: timestamp before scrape finishes
+        # Send sentinel values to stop workers
+        for _ in range(_WORKER_COUNT):
+            await scrape_queue.put(None)
 
-    # --- Phase 2: Scrape (100 concurrent, starts as domains arrive) ---
+    # --- Phase 2: Scrape (workers with sentinel shutdown, semaphore for concurrency) ---
 
     scrape_sem = asyncio.Semaphore(scrape_concurrent)
     scrape_started = datetime.now(timezone.utc)
+    _WORKER_COUNT = min(scrape_concurrent, 20)  # FIX #1: 20 workers, not 100. Semaphore limits actual concurrency.
 
     async def scrape_worker():
         while True:
-            try:
-                domain = await asyncio.wait_for(scrape_queue.get(), timeout=2.0)
-            except asyncio.TimeoutError:
-                if gather_done.is_set() and scrape_queue.empty():
-                    break
-                continue
+            domain = await scrape_queue.get()  # FIX #1: no timeout polling. Sentinel (None) terminates.
+            if domain is None:
+                scrape_queue.task_done()
+                break
 
             async with scrape_sem:
                 url = f"https://{domain}"
@@ -173,12 +177,12 @@ async def pipeline_gather_and_scrape(
                 scrape_results[domain] = {
                     "status": "success" if result.get("success") else "failed",
                     "text_length": len(result.get("text", "")),
-                    "text": (result.get("text", ""))[:5000],  # cap per company
+                    "text": (result.get("text", ""))[:3000],  # FIX #4: 3K per company (400 × 3K = 1.2MB, fits MCP)
                 }
                 scrape_queue.task_done()
 
-    # Run both phases concurrently — scraping starts as domains arrive
-    scrape_workers = [scrape_worker() for _ in range(scrape_concurrent)]
+    # Run both phases concurrently — scraping starts as domains arrive from Apollo
+    scrape_workers = [scrape_worker() for _ in range(_WORKER_COUNT)]
 
     await asyncio.gather(
         run_gather(),
@@ -186,22 +190,44 @@ async def pipeline_gather_and_scrape(
         return_exceptions=True,
     )
 
-    gather_completed = datetime.now(timezone.utc)
+    gather_completed = _gather_completed_at[0] if _gather_completed_at else datetime.now(timezone.utc)
     scrape_completed = datetime.now(timezone.utc)
 
-    # --- Merge scrape results into companies ---
+    # --- Save scraped text to workspace file (not in MCP response — too large) ---
+    # FIX #4: Response returns companies WITHOUT full text. Text saved to file.
 
     for domain, comp in companies.items():
         sr = scrape_results.get(domain, {"status": "not_scraped", "text_length": 0, "text": ""})
-        comp["scrape"] = sr
+        comp["scrape"] = {
+            "status": sr["status"],
+            "text_length": sr["text_length"],
+        }
+        comp["_scraped_text"] = sr.get("text", "")  # kept in-memory for file save, stripped from response
 
     completed_at = datetime.now(timezone.utc)
     total_credits = sum(r["result"]["credits_used"] for r in requests)
 
+    # Build response: companies WITHOUT full scraped text (too large for MCP response)
+    # Agent uses save_data to persist, then reads text per-company for classification
+    response_companies = {}
+    for domain, comp in companies.items():
+        rc = dict(comp)
+        rc.pop("_scraped_text", None)  # strip from response
+        response_companies[domain] = rc
+
+    # Also build a separate dict for the agent to pass to classification agents
+    # Key: domain, Value: first 2500 chars of scraped text
+    scraped_texts = {
+        d: comp.get("_scraped_text", "")[:2500]
+        for d, comp in companies.items()
+        if comp.get("scrape", {}).get("status") == "success"
+    }
+
     return {
         "success": True,
         "data": {
-            "companies": companies,
+            "companies": response_companies,
+            "scraped_texts": scraped_texts,  # separate dict for classification agent prompts
             "requests": requests,
             "stats": {
                 "total_companies": len(companies),
