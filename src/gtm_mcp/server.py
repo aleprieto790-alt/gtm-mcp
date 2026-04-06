@@ -25,11 +25,14 @@ _workspace = WorkspaceManager(_config.dir)
 
 @mcp.tool()
 async def get_config() -> dict:
-    """Get current configuration (API keys status, not values)."""
+    """Get current configuration. API keys show true/false (not values). Non-secret fields returned as values."""
     cfg = _config.all()
+    # Non-secret fields — safe to return actual values
+    safe_values = {"user_email", "google_shared_drive_id"}
     return {
         "success": True,
         "configured": {k: bool(v) for k, v in cfg.items()},
+        "values": {k: v for k, v in cfg.items() if k in safe_values and v},
         "workspace": str(_config.dir),
     }
 
