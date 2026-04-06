@@ -287,11 +287,7 @@ pytest tests/ -v
 
 ## Inspired By
 
-Project structure follows [claude-pipe](https://github.com/bluzir/claude-pipe) conventions for organizing Claude Code projects:
-
-- **Commands** (`.claude/commands/`) — entry points that orchestrate multi-step workflows
-- **Skills** (`.claude/skills/`) — domain knowledge in markdown, read by the agent at each step
-- **Agents** (`.claude/agents/`) — spawnable sub-agents for batch work (parallel scrape+classify)
+[claude-pipe](https://github.com/bluzir/claude-pipe) — conventions for structuring Claude Code projects with commands, skills, and agents.
 
 ## License
 
