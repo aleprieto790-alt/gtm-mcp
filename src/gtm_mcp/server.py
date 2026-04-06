@@ -1,4 +1,4 @@
-"""GTM-MCP Server — 37 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 38 thin tools, zero LLM calls. stdio transport via FastMCP."""
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -307,13 +307,27 @@ async def smartlead_add_leads(campaign_id: int, leads: list[dict]) -> dict:
 
 @mcp.tool()
 async def smartlead_list_accounts() -> dict:
-    """List ALL SmartLead email accounts (paginated — handles 2000+ accounts).
+    """Load ALL SmartLead email accounts, cache locally, return SUMMARY.
 
-    Returns every account with: id, from_email, from_name, warmup_status.
-    Fetches all pages automatically (100 per page).
+    With 2000+ accounts, the full list is too large for tool results.
+    This caches all accounts to ~/.gtm-mcp/email_accounts.json and returns:
+    total count, unique domains, top 20 domains by account count.
+    Use smartlead_search_accounts(query) to filter by name/email/domain.
     """
     from gtm_mcp.tools.smartlead import smartlead_list_accounts as _impl
-    return await _impl(config=_config)
+    return await _impl(config=_config, workspace=_workspace)
+
+
+@mcp.tool()
+async def smartlead_search_accounts(query: str) -> dict:
+    """Search cached email accounts by name, email, or domain.
+
+    Call smartlead_list_accounts() first to populate the cache.
+    Example queries: "sally", "danila", "renat@", "getsally.io"
+    Returns matching accounts with IDs ready for campaign creation.
+    """
+    from gtm_mcp.tools.smartlead import smartlead_search_accounts as _impl
+    return await _impl(query, config=_config, workspace=_workspace)
 
 
 @mcp.tool()

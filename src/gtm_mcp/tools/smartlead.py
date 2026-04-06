@@ -168,16 +168,24 @@ async def smartlead_export_leads(campaign_id: int, *, config=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# List email accounts — PAGINATED (handles 2000+ accounts)
+# List email accounts — caches locally, returns summary only
 # ---------------------------------------------------------------------------
 
-async def smartlead_list_accounts(*, config=None) -> dict:
-    """Load ALL SmartLead email accounts with pagination.
+_ACCOUNTS_CACHE_FILE = "email_accounts.json"
 
-    SmartLead returns max 100 per call. With 2000+ accounts,
-    this loops through all pages using offset parameter.
+
+async def smartlead_list_accounts(*, config=None, workspace=None) -> dict:
+    """Load ALL SmartLead email accounts, cache locally, return SUMMARY only.
+
+    With 2000+ accounts, the full list overflows MCP tool result limits.
+    This caches to ~/.gtm-mcp/email_accounts.json and returns:
+    - total count
+    - unique domains with account counts
+    - cache timestamp
+    Use smartlead_search_accounts(query) to filter by name/email/domain.
     """
     config = config or _default_config()
+    workspace = workspace or _default_workspace()
     api_key = config.get("smartlead_api_key")
     if not api_key:
         return {"success": False, "error": "smartlead_api_key not configured"}
@@ -204,7 +212,78 @@ async def smartlead_list_accounts(*, config=None) -> dict:
         "warmup_status": a.get("warmup_status", ""),
     } for a in all_accounts]
 
-    return {"success": True, "data": accounts, "count": len(accounts)}
+    # Cache full list locally
+    import json
+    cache_path = workspace.base / _ACCOUNTS_CACHE_FILE
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps({
+        "cached_at": datetime.now(tz.utc).isoformat(),
+        "accounts": accounts,
+    }, indent=2, ensure_ascii=False))
+
+    # Return summary only (not 2000+ accounts)
+    domains: dict[str, int] = {}
+    for a in accounts:
+        email = a.get("from_email", "")
+        domain = email.split("@")[1] if "@" in email else "unknown"
+        domains[domain] = domains.get(domain, 0) + 1
+
+    return {"success": True, "data": {
+        "total": len(accounts),
+        "unique_domains": len(domains),
+        "top_domains": dict(sorted(domains.items(), key=lambda x: -x[1])[:20]),
+        "cached_at": datetime.now(tz.utc).isoformat(),
+        "cache_path": str(cache_path),
+    }}
+
+
+# ---------------------------------------------------------------------------
+# Search email accounts — filters from local cache
+# ---------------------------------------------------------------------------
+
+async def smartlead_search_accounts(query: str, *, config=None, workspace=None) -> dict:
+    """Search cached email accounts by name, email, or domain substring.
+
+    Call smartlead_list_accounts() first to populate the cache.
+    Returns matching accounts (filtered, small result).
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+
+    import json
+    cache_path = workspace.base / _ACCOUNTS_CACHE_FILE
+    if not cache_path.exists():
+        return {"success": False, "error": "Account cache not found. Call smartlead_list_accounts() first."}
+
+    cache = json.loads(cache_path.read_text())
+    accounts = cache.get("accounts", [])
+
+    # Filter by query (case-insensitive substring match on email + name)
+    q = query.lower().strip()
+    # Remove common filler words
+    stop_words = {"all", "with", "in", "the", "my", "use", "accounts", "from", "of"}
+    terms = [t for t in q.split() if t not in stop_words]
+
+    matched = []
+    for a in accounts:
+        combined = f"{a.get('from_email', '')} {a.get('from_name', '')}".lower()
+        if all(t in combined for t in terms):
+            matched.append(a)
+
+    # Group by domain for readability
+    by_domain: dict[str, list] = {}
+    for a in matched:
+        email = a.get("from_email", "")
+        domain = email.split("@")[1] if "@" in email else "unknown"
+        by_domain.setdefault(domain, []).append(a)
+
+    return {"success": True, "data": {
+        "query": query,
+        "matched": len(matched),
+        "accounts": matched,
+        "by_domain": {d: len(accs) for d, accs in by_domain.items()},
+        "account_ids": [a["id"] for a in matched],
+    }}
 
 
 # ---------------------------------------------------------------------------
@@ -245,21 +324,35 @@ async def smartlead_create_campaign(
         return {"success": False, "error": f"No campaign ID: {create_data}"}
 
     # Step 2: schedule (Mon-Fri 9-18 target timezone)
-    await _api_call("POST", f"/campaigns/{campaign_id}/schedule", api_key,
+    step2 = await _api_call("POST", f"/campaigns/{campaign_id}/schedule", api_key,
                     json_data={"timezone": timezone, "days_of_the_week": [1, 2, 3, 4, 5],
                                "start_hour": "09:00", "end_hour": "18:00",
                                "min_time_btw_emails": 3, "max_new_leads_per_day": 1500})
+    if step2 is None:
+        logger.error("Campaign %s: schedule setup failed", campaign_id)
 
     # Step 3: settings (plain text, no tracking, stop on reply, AI ESP matching)
-    await _api_call("POST", f"/campaigns/{campaign_id}/settings", api_key,
+    step3 = await _api_call("POST", f"/campaigns/{campaign_id}/settings", api_key,
                     json_data={"track_settings": [],
                                "stop_lead_settings": "REPLY_TO_AN_EMAIL",
                                "send_as_plain_text": True, "follow_up_percentage": 40,
                                "enable_ai_esp_matching": True})
+    if step3 is None:
+        logger.error("Campaign %s: settings setup failed", campaign_id)
 
     # Step 4: assign email accounts
-    await _api_call("POST", f"/campaigns/{campaign_id}/email-accounts", api_key,
+    step4 = await _api_call("POST", f"/campaigns/{campaign_id}/email-accounts", api_key,
                     json_data={"email_account_ids": sending_account_ids})
+    if step4 is None:
+        logger.error("Campaign %s: email account assignment failed", campaign_id)
+
+    setup_warnings = []
+    if step2 is None:
+        setup_warnings.append("schedule")
+    if step3 is None:
+        setup_warnings.append("settings")
+    if step4 is None:
+        setup_warnings.append("email_accounts")
 
     # Step 5: save locally
     slug = name.lower().replace(" ", "-").replace("—", "-")
@@ -273,7 +366,10 @@ async def smartlead_create_campaign(
     }
     workspace.save(project, f"campaigns/{slug}/campaign.yaml", campaign_data)
 
-    return {"success": True, "data": campaign_data}
+    result = {"success": True, "data": campaign_data}
+    if setup_warnings:
+        result["warnings"] = f"These setup steps failed (campaign created but incomplete): {', '.join(setup_warnings)}"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +467,8 @@ async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=Non
 
     data = await _api_call("POST", f"/campaigns/{campaign_id}/leads", api_key,
                            json_data={"lead_list": lead_list})
+    if data is None:
+        return {"success": False, "error": f"Failed to add {len(lead_list)} leads to campaign {campaign_id}"}
     return {"success": True, "data": {"campaign_id": campaign_id, "leads_added": len(lead_list)}}
 
 
@@ -469,7 +567,7 @@ async def smartlead_send_test_email(
 
     # Auto-resolve email account (first assigned)
     accounts = await _api_call("GET", f"/campaigns/{campaign_id}/email-accounts", api_key)
-    if not accounts or not isinstance(accounts, list) or not accounts:
+    if not accounts or not isinstance(accounts, list):
         return {"success": False, "error": "No email accounts on this campaign"}
     email_account_id = accounts[0].get("id")
 

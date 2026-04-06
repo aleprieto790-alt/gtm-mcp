@@ -108,10 +108,18 @@ Collect probe_breakdown: companies per filter, total available.
 apollo_estimate_cost(target_count=kpi, contacts_per_company=3)
 ```
 
-**Resolve email accounts:**
+**Resolve email accounts (user MUST specify):**
 ```
-accounts = smartlead_list_accounts()
-→ Filter by user hint or ask which to use
+# Step 1: Cache all accounts (returns summary only — count + domains)
+smartlead_list_accounts()
+
+# Step 2: User MUST tell you which accounts. Ask if not provided:
+#   "Which email accounts should I use? (e.g. 'accounts with Sally', 'danila@', domain name)"
+# NEVER assume accounts — always ask or use the hint from user input.
+
+# Step 3: Search by user's hint
+smartlead_search_accounts("sally")  # or whatever the user specified
+→ Returns matching account IDs ready for campaign creation
 ```
 
 **Create run file:**
