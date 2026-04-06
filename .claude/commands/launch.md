@@ -27,6 +27,10 @@ Full pipeline: input → gather → qualify → SmartLead campaign. **Two human 
 - `apollo_search_people_batch` NOT individual `apollo_search_people`
 - `apollo_enrich_people` already batches (auto-chunks to 10)
 
+**Timestamp EVERY phase** in run file for post-run speed analysis:
+Record `{phase}_started` and `{phase}_completed` ISO timestamps in `round.timestamps`.
+After run, verify: each phase starts within 5s of previous completing. Gaps > 30s = bug.
+
 **Read before starting:**
 - **pipeline-state** skill — run file entity format (FilterSnapshot, Company, Contact)
 - **io-state-safe** skill — state.yaml schema and validation rules
@@ -421,56 +425,121 @@ save_data(project, "runs/run-001.json", {
 
 **Stop adding new keyword batches when 400 unique companies reached in this round.**
 
-### Scrape ALL gathered companies at once (fast batch)
+### Phase A: SCRAPE — one atomic batch call (~30-60s)
 
-**Do NOT scrape one by one. Do NOT spawn agents for scraping.**
-Call `scrape_batch` ONCE with ALL gathered domains — it handles 100 concurrent via Apify proxy internally.
+Record: `round.timestamps.scrape_started = "{now}"`
 
 ```
 all_domains = ["https://" + d for d in gathered_companies.keys()]
 results = scrape_batch(all_domains, max_concurrent=100)
-→ 100 concurrent Apify residential proxy requests
-→ 3-layer fallback per URL: proxy → direct → HTTP
-→ 429/5xx auto-retried with backoff
-→ Returns ALL results in ONE tool call
 ```
 
-Store scrape results: `company.scrape = {status, text_length, text}`
+**ONE tool call. 100 concurrent Apify requests. ~30-60s for 300-400 domains.**
+Do NOT scrape one by one. Do NOT spawn agents. Do NOT use Fetch/WebFetch.
 
-This takes ~30-60 seconds for 300-400 domains. No agents, no Fetch, no per-URL tool calls.
-
-### Classify + People extraction (streaming mini-batches)
-
-After batch scrape completes, process in mini-batches of 20-30 scraped companies:
-
+Store results in run file:
 ```
-MINI-BATCH LOOP (repeat until KPI met):
-
-1. CLASSIFY — inline (you ARE the LLM, read company-qualification skill rules):
-   For each successfully scraped company in this batch:
-   - Read scraped text, apply via negativa rules from company-qualification skill
-   - Classify from SCRAPED TEXT ONLY — never Apollo industry label
-   - Output: is_target, confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning
-   - Normalize company name (strip Inc., LLC, etc.)
-   Store: company.classification = {is_target, confidence, segment, reasoning}
-
-2. PEOPLE — for targets in this batch, extract contacts immediately:
-   For each target (is_target == true) in this mini-batch:
-     apollo_search_people(domain=target.domain, person_seniorities=[...])  # FREE
-     apollo_enrich_people(person_ids=[top_3])  # 1 credit/person
-   Store contacts, update totals.
-
-3. KPI CHECK:
-   If total_verified_contacts >= kpi.target_people → STOP, proceed to Step 6
-   If credits_used >= max_credits → STOP with warning
-   Otherwise → next mini-batch of scraped companies
-
-4. SAVE — update run file after each mini-batch:
-   save_data(project, "runs/{run_id}.json", {companies: {...}, contacts: [...], totals: {...}}, mode="merge")
+save_data(project, "runs/{run_id}.json", {
+  companies: {domain: {...existing, scrape: {status, text_length, text}} for each result}
+}, mode="merge")
 ```
 
-**CRITICAL: stop as soon as KPI met.** Do NOT classify remaining companies if you already have enough targets.
-Do NOT wait for all companies to be classified before starting people extraction.
+Record: `round.timestamps.scrape_completed = "{now}"`
+
+### Phase B: CLASSIFY — spawn agents for pre-scraped text (~3-5 min)
+
+Record: `round.timestamps.classify_started = "{now}"`
+
+**If <30 scraped companies**: classify inline (agent overhead > inline time).
+**If 30-400 scraped companies**: spawn 2-3 classification agents in background.
+
+```
+# Split scraped companies into chunks for parallel agents
+successfully_scraped = [c for c in companies if c.scrape.status == "success"]
+chunk_size = len(successfully_scraped) // 3
+
+Agent(
+  prompt: "Classify these companies. Read the company-qualification skill.
+    Offer: {primary_offer}
+    Segments: {segments}
+    Exclusions: {exclusion_list}
+    
+    RULES: classify from the TEXT BELOW only. Never re-scrape. Never use Fetch.
+    Only call save_data to write results.
+    
+    Companies:
+    1. domain1.com | {scraped_text[:2000]}
+    2. domain2.com | {scraped_text[:2000]}
+    ... (up to 130 companies)
+    
+    For each: is_target (bool), confidence (0-100), segment (CAPS), reasoning (1 sentence)
+    Normalize name: strip Inc/LLC/Ltd/Corp/GmbH
+    
+    save_data('{project}', 'runs/{run_id}.json',
+      {companies: {domain: {classification: {is_target, confidence, segment, reasoning}, name_normalized: X}}},
+      mode='merge')"
+  subagent_type: general-purpose
+  run_in_background: true
+)
+```
+
+**Spawn all agents simultaneously. Each has implicit timeout (Claude Code ~10 min).**
+
+Wait for all agents to complete. Read updated run file.
+
+Record: `round.timestamps.classify_completed = "{now}"`
+
+### Phase C: PEOPLE — batch search + batch enrich (~20-30s)
+
+Record: `round.timestamps.people_started = "{now}"`
+
+```
+# Collect all target domains
+target_domains = [d for d, c in companies.items() if c.classification.is_target]
+
+# ONE tool call: search all targets in parallel (FREE, 20 concurrent)
+search_results = apollo_search_people_batch(target_domains, person_seniorities=[...], per_page=10)
+
+# Collect top 3 person IDs per company, flatten
+all_person_ids = []
+for result in search_results.data.results:
+  top_3 = [p.id for p in result.people[:3]]
+  all_person_ids.extend(top_3)
+
+# ONE tool call: enrich all people (auto-chunks to 10, 1 credit per verified email)
+enriched = apollo_enrich_people(all_person_ids)
+```
+
+**Two tool calls total for all people extraction.** Not per-company. Not per-person.
+
+Record: `round.timestamps.people_completed = "{now}"`
+
+### KPI check + save
+
+```
+If len(verified_contacts) >= kpi.target_people → proceed to Step 6
+If credits_used >= max_credits → STOP with warning
+If not enough targets → next keyword batch (Round 2)
+```
+
+**Save the complete round with timestamps:**
+```
+save_data(project, "runs/{run_id}.json", {
+  rounds: [{
+    id: "round-001",
+    timestamps: {
+      gather_started, gather_completed,
+      scrape_started, scrape_completed,
+      classify_started, classify_completed,
+      people_started, people_completed
+    },
+    gather_phase: {keywords_used, request_ids, unique_companies, credits_used},
+    scrape_phase: {total, success, failed, concurrent: 100, duration_seconds},
+    classify_phase: {method: "agents"|"inline", agents_spawned, targets, rejected, target_rate, duration_seconds},
+    people_phase: {targets_processed, contacts_extracted, credits_used, duration_seconds}
+  }]
+}, mode="merge")
+```
 
 **After all mini-batches complete**, compute totals:
 ```
