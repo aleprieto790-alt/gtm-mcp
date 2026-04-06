@@ -310,7 +310,7 @@ pytest tests/ -v
 
 ## Inspired By
 
-[claude-pipe](https://github.com/bluzir/claude-pipe) — conventions for structuring Claude Code projects with commands, skills, and agents.
+[claude-pipe](https://github.com/bluzir/claude-pipe) — file-first agent orchestration framework for building deterministic pipelines with Claude Code. Core ideas adopted: state persists to YAML files (not context), 4-layer data model (L0 config → L1 directives → L2 operational → L3 artifacts), ROOT orchestrates while workers execute to files, quality gates between phases, and predictable costs through deterministic tool code. gtm-mcp pushes all repeatable work (API calls, scraping, dedup, campaign creation, cost tracking) into MCP tools — the agent handles only what requires judgment.
 
 ## License
 
