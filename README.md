@@ -164,14 +164,6 @@ Your AI Agent ──stdio──► gtm-mcp server (38 tools, 0 LLM calls)
 
 **Commands** (`.claude/commands/`): The `/launch` command — a flat 7-step orchestrator with concrete tool calls.
 
-### Approach
-
-Project structure follows [claude-pipe](https://github.com/bluzir/claude-pipe) conventions for organizing Claude Code projects:
-
-- **Commands** (`.claude/commands/`) — entry points that orchestrate multi-step workflows. The `/launch` command is a flat 7-step pipeline with concrete tool calls — no framework, no daemon, no state machine.
-- **Skills** (`.claude/skills/`) — domain knowledge in markdown. The agent reads these at each step for extraction rules, classification logic, sequence generation, etc.
-- **Agents** (`.claude/agents/`) — definitions for spawnable sub-agents that handle batch work (e.g. company-qualifier for parallel scrape+classify of 50+ companies).
-
 ### Pipeline Steps
 
 | Step | What happens | Human input |
@@ -292,6 +284,14 @@ All project data in `~/.gtm-mcp/projects/<slug>/`:
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+## Inspired By
+
+Project structure follows [claude-pipe](https://github.com/bluzir/claude-pipe) conventions for organizing Claude Code projects:
+
+- **Commands** (`.claude/commands/`) — entry points that orchestrate multi-step workflows
+- **Skills** (`.claude/skills/`) — domain knowledge in markdown, read by the agent at each step
+- **Agents** (`.claude/agents/`) — spawnable sub-agents for batch work (parallel scrape+classify)
 
 ## License
 
