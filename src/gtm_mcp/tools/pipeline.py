@@ -136,6 +136,9 @@ async def pipeline_gather_and_scrape(
             # Low yield: <10 on page 1 → stop
             if page == 1 and len(raw_companies) < 10:
                 break
+            # Exhausted: page returned companies but 0 new unique → stop
+            if new_unique == 0:
+                break
 
     gather_started = datetime.now(timezone.utc)
 
