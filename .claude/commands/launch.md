@@ -699,18 +699,30 @@ save_data(project, "state.yaml", {..., phase_states: {sequence_generation: "comp
 
 Update state: `save_data(project, "state.yaml", {..., current_phase: "campaign_push", phase_states: {campaign_push: "in_progress"}})`
 
-### Create campaign (Mode 1/2)
+### Create campaign + upload leads — ONE atomic tool call (Mode 1/2)
+
+**Do NOT call smartlead_create_campaign, smartlead_set_sequence, smartlead_add_leads separately.**
+**Use `campaign_push` — one tool call does everything deterministically.**
 
 ```
-campaign = smartlead_create_campaign(project, "{Segment} — {Geo}", account_ids, country_code, segment)
-smartlead_set_sequence(project, campaign.slug, campaign.campaign_id, sequence_steps)
+# First, save leads to a file (tool reads from disk — no size limit)
+save_data(project, "leads_for_push.json", all_leads_array)
+
+# ONE tool call: create → sequence → upload all leads → test email
+result = campaign_push(
+  project=project_slug,
+  campaign_name="{Segment} — {Geo}",
+  sending_account_ids=selected_account_ids,
+  country=country_code,
+  segment=segment_name,
+  sequence_steps=sequence_steps,
+  leads_file="leads_for_push.json",
+  test_email=user_email                    # from get_config().values.user_email
+)
+→ Returns: campaign_id, leads_uploaded, test_email_sent
 ```
 
-### Upload contacts (all modes)
-
-```
-smartlead_add_leads(campaign_id, [{email, first_name, last_name, company_name, custom_fields: {segment, city}}])
-```
+This replaces 4+ separate tool calls. Zero LLM needed. ~10 seconds total.
 
 ### Update tracking — ALL THREE files must be updated
 

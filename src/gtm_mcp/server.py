@@ -328,6 +328,34 @@ async def scrape_batch(urls: list[str], max_concurrent: int = 50) -> dict:
 # ─── Pipeline Tools ──────────────────────────────────────────────────────────
 
 @mcp.tool()
+async def campaign_push(
+    project: str,
+    campaign_name: str,
+    sending_account_ids: list[int],
+    country: str,
+    segment: str,
+    sequence_steps: list[dict],
+    leads_file: str,
+    test_email: str = "",
+) -> dict:
+    """Atomic SmartLead campaign setup — ONE tool call does everything.
+
+    Creates campaign (DRAFT) → sets sequence → uploads ALL leads from file → sends test email.
+    100% deterministic. Zero LLM needed. Replaces 4+ separate tool calls.
+
+    leads_file: path to JSON file with leads array (relative to project or absolute).
+    Each lead: {email, first_name, last_name, company_name, custom_fields: {segment, city}}
+    """
+    from gtm_mcp.tools.campaign_push import campaign_push as _impl
+    return await _impl(
+        project, campaign_name, sending_account_ids, country, segment,
+        sequence_steps, leads_file, test_email,
+        config=_config, workspace=_workspace,
+    )
+
+
+
+@mcp.tool()
 async def pipeline_gather_and_scrape(
     keywords: list[str],
     industry_tag_ids: list[str],
