@@ -57,11 +57,15 @@ async def pipeline_gather_and_scrape(
     started_at = datetime.now(timezone.utc)
     seen_domains: set[str] = set()
 
-    # Load global blacklist — skip blacklisted domains during gathering
-    if workspace:
-        bl = workspace._load_blacklist()
-        seen_domains.update(bl.keys())
-        logger.info("Loaded %d blacklisted domains", len(bl))
+    # Load PROJECT-LEVEL blacklist (not global — different projects may target same contacts)
+    if workspace and project:
+        bl_data = workspace.load(project, "blacklist.json")
+        if bl_data and isinstance(bl_data, dict):
+            seen_domains.update(bl_data.keys())
+            logger.info("Loaded %d blacklisted domains for project %s", len(bl_data), project)
+        elif bl_data and isinstance(bl_data, list):
+            seen_domains.update(bl_data)
+            logger.info("Loaded %d blacklisted domains for project %s", len(bl_data), project)
     companies: dict[str, dict] = {}
     requests: list[dict] = []
     scrape_queue: asyncio.Queue = asyncio.Queue()

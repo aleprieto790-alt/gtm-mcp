@@ -272,9 +272,10 @@ Show: "Found {N} accounts matching '{hint}': {top emails}. Using these."
 If user provides campaign names/IDs/URLs:
   → Extract campaign_id from SmartLead URL if provided:
     "https://app.smartlead.ai/app/email-campaign/3137079/analytics" → campaign_id = 3137079
-  → smartlead_export_leads(campaign_id) → extract domains + emails
-  → blacklist_add(domains, source="smartlead_campaign", campaign_name=campaign_name)
-  → Show: "Blacklisted {N} domains from campaign {name}."
+  → smartlead_export_leads(campaign_id) → extract domains
+  → Save as PROJECT-LEVEL blacklist (not global — different project = different offer = OK to contact):
+    save_data(project, "blacklist.json", {domain: {source: "smartlead_campaign", campaign_name: ...} for domain in domains})
+  → Show: "Blacklisted {N} domains from campaign {name} (project-level)."
 
 If user provides Google Sheet URL:
   → Extract sheet_id from URL
