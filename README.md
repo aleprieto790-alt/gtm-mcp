@@ -1,327 +1,233 @@
-# MCP LeadGen — AI-Powered Lead Generation Platform
+# GTM-MCP — B2B Lead Generation for AI Agents
 
-An open-source MCP (Model Context Protocol) server that enables AI agents (Claude, GPT, etc.) to manage B2B lead generation pipelines end-to-end.
+An open-source MCP server that turns your AI agent into a full B2B lead generation pipeline. Tell it what you sell and who you're targeting — it finds companies, verifies contacts, and creates ready-to-send email campaigns.
 
-> **Want to skip the setup?** Use the hosted version at [gtm-mcp.com](https://gtm-mcp.com/) — sign up and start generating leads in minutes, no infrastructure required.
+Zero LLM calls inside the server. Your AI agent (Claude, GPT, etc.) does all the reasoning using domain knowledge encoded as skills.
 
-## What It Does
-
-Connect your AI assistant to this MCP server and it can:
-- **Search** Apollo for target companies and contacts
-- **Scrape** and analyze company websites
-- **Classify** leads using AI (OpenAI / Gemini / Anthropic)
-- **Enrich** contacts with verified emails
-- **Push** qualified leads to SmartLead email campaigns
-- **Automate** LinkedIn outreach via GetSales
-- **Monitor** campaign replies and categorize responses
-- **Learn** from operator corrections — the system tracks approved/dismissed reply drafts to improve over time
-
-## Example Queries
-
-Just tell your AI agent what you want in plain English:
-
-### Single-segment campaign
-```
-easystaff.io
-IT consulting companies in Miami
-```
-Creates a project from the website, then gathers IT consulting companies in Miami via Apollo, classifies them, extracts contacts, and pushes to a SmartLead campaign as DRAFT.
-
-### Multi-segment campaign
-```
-easystaff.io
-IT consulting companies in Miami
-Video production in London
-```
-Creates separate pipelines per segment. Each runs independently with its own keywords, filters, and campaign.
-
-### From a website
-```
-https://thefashionpeople.com/
-Fashion brands in Italy
-```
-Scrapes the website to understand the offer, auto-generates 20+ Apollo keywords for fashion brands, gathers and classifies companies in Italy.
-
-### Extended geo for faster KPI
-```
-IT consulting companies in US
-Video production in UK
-```
-Broader geo = more companies available = KPI (100 contacts) reached faster.
-
-### Check your data
-```
-How much total contacts in apollo?
-```
-
-### Multi-segment in one message
-```
-Find IT consulting companies in Miami and video production companies in London
-```
-The system parses this into 2 separate segments and confirms before launching.
-
-### Launch from a strategy document
-Write your outreach strategy in a file (offer, ICP, segments, sequence style, sender info) and tell your AI agent:
-```
-Launch outreach-plan.md
-```
-The agent reads your file and passes it to `create_project` with `document_text`. The system automatically extracts everything — offer, target roles, segments, email sequence style, campaign settings — and creates a fully configured project. You just confirm the offer and it runs.
-
-Example `outreach-plan.md`:
-```markdown
-# Company: EasyStaff
-## Offer
-Global payroll & contractor payments for companies hiring remote teams.
-## ICP
-- IT outsourcing companies, 50-500 employees
-- SaaS companies with distributed teams
-- Digital agencies scaling internationally
-## Segments
-- IT consulting companies in US
-- SaaS companies in DACH region
-- Digital agencies in UK
-## Sender
-Name: Alex, Position: Partnership Manager, Company: EasyStaff
-## Sequence style
-Casual, short, question-based. 4 emails. Reference their tech stack.
-```
-
-This replaces manual project setup — one file drives the entire campaign creation flow.
-
-## Pipeline Flow
-
-The strict flow ensures no credits are wasted:
+## How It Works
 
 ```
-1. create_project (website → offer extraction)     → WAIT for approval
-2. confirm_offer                                    → WAIT
-3. align_email_accounts (select SmartLead senders)  → WAIT
-4. tam_gather PREVIEW (probe Apollo, show strategy) → WAIT for "Proceed?"
-5. tam_gather CONFIRM → pipeline runs autonomously:
-   gather → scrape → classify → extract people → push to SmartLead DRAFT
+You: /launch outreach-plan-fintech.md
+
+Agent: extracts offer → generates Apollo filters → probes (6 credits)
+
+Agent: "Here's your strategy document. 25 keywords, 3 industries,
+        estimated ~130 credits for 100 contacts. Proceed?"
+
+You: proceed
+
+Agent: [autonomous — gathers 400 companies, scrapes websites,
+        classifies via negativa, extracts 102 verified contacts,
+        creates SmartLead campaign, sends test email, exports Google Sheet]
+
+Agent: "Campaign ready (DRAFT). 102 contacts uploaded.
+        Test email sent — check your inbox. Type 'activate' to launch."
+
+You: activate
 ```
 
-Default KPIs: **100 contacts, 3 per company**. Pipeline stops automatically when KPI is hit.
+Two human checkpoints. Everything else autonomous.
+
+## Prerequisites
+
+**Data sources:**
+- [Apollo](https://apollo.io) — company and contact search (required)
+- More coming soon
+
+**Scraping:**
+- [Apify](https://apify.com) — residential proxy for website scraping (optional, improves success rate)
+
+**Outreach platforms:**
+- [SmartLead](https://smartlead.ai) — email campaigns (required for campaign creation)
+- [GetSales](https://getsales.io) — LinkedIn automation (optional)
+- More coming soon: Instantly, Heyreach
+
+**Optional:**
+- Google Sheets — contact CRM export with classification reasoning
+- Telegram — notifications via MCP plugin
+
+## Quick Start
+
+```bash
+git clone https://github.com/petrNikolaev1/gtm-mcp.git
+cd gtm-mcp
+cp .env.example .env    # fill in your API keys
+pip install -e .         # or: uv sync
+```
+
+### Configure `.env`
+
+```bash
+# Required
+GTM_MCP_APOLLO_API_KEY=your_apollo_key
+GTM_MCP_SMARTLEAD_API_KEY=your_smartlead_key
+
+# Your email — receives test emails before campaign activation
+GTM_MCP_USER_EMAIL=you@company.com
+
+# Optional
+GTM_MCP_GETSALES_API_KEY=
+GTM_MCP_GETSALES_TEAM_ID=
+GTM_MCP_APIFY_PROXY_PASSWORD=
+
+# Optional — Google Sheets export
+GOOGLE_SERVICE_ACCOUNT_JSON=
+GOOGLE_SHARED_DRIVE_ID=
+```
+
+### Connect to Claude Code
+
+The server runs via stdio. Add to your Claude Code config or use the included `.mcp.json`:
+
+```bash
+# Open Claude Code in this directory
+claude
+# Then type:
+/launch https://yourcompany.com SaaS companies in US
+```
+
+## Use Cases
+
+### New project from a strategy document
+
+```
+/launch outreach-plan-fintech.md
+```
+
+Reads your document, extracts offer/ICP/segments/sequences, generates Apollo filters, gathers companies, classifies, extracts contacts, creates SmartLead campaign. Full pipeline.
+
+### New project from a website
+
+```
+/launch https://acme.com payments in Miami
+```
+
+Scrapes the website, understands the product, generates keywords, runs the pipeline.
+
+### New project from a description
+
+```
+/launch "We sell payroll software for SMBs, target US and UK"
+```
+
+Works with plain text too.
+
+### Add more contacts to an existing campaign
+
+```
+/launch campaign=3070919 kpi=+100
+```
+
+Reuses the same project, same email accounts, same sequence. Gathers 100 MORE contacts using smarter keywords (seeded from previous run's best performers). Deduplicates against existing campaign leads. Pushes only new contacts.
+
+Previous knowledge is fully reused:
+- Keywords that found the most targets are tried first
+- Companies already gathered are skipped (no wasted credits)
+- Page offsets are preserved (no re-fetching)
+- Email dedup against existing campaign leads
+
+### New segment within an existing project
+
+```
+/launch project=easystaff segment=LENDING geo=UK accounts with Elnar
+```
+
+Reuses the approved offer (skip extraction). Generates new filters for LENDING in UK. Selects different email accounts. Creates a separate SmartLead campaign. The agent only needs:
+- Segment name (must differ from existing campaigns)
+- Geography
+- Email account selection
+
+### New project for a different product
+
+```
+/launch https://newproduct.com payments in Germany
+```
+
+Full pipeline from scratch. If `filter_intelligence.json` has data from similar segments in past projects, proven keywords are used as seeds.
 
 ## Architecture
 
 ```
-AI Agent (Claude/GPT) ──MCP Protocol──► Backend (FastAPI)
-                                            │
-                                    ┌───────┼───────┐
-                                    ▼       ▼       ▼
-                                PostgreSQL Redis  External APIs
-                                (pgvector)        (Apollo, SmartLead,
-                                                   OpenAI, GetSales)
-                                            │
-Frontend (React) ◄──────────────────────────┘
+Your AI Agent ──stdio──► gtm-mcp server (37 tools, 0 LLM calls)
+                              │
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+                Apollo    SmartLead   GetSales
+                (search)  (campaigns) (LinkedIn)
 ```
 
-- **Backend**: FastAPI + async SQLAlchemy + MCP SDK (SSE transport)
-- **Frontend**: React 19 + TypeScript + Vite + Tailwind + AG Grid
-- **Database**: PostgreSQL with pgvector extension
-- **Cache**: Redis for rate limiting and session data
+**Tools** (`src/gtm_mcp/`): Thin API wrappers. Zero LLM calls. Only data access.
 
-## Quick Start
+**Skills** (`.claude/skills/`): Domain knowledge in markdown. Your AI agent reads these and reasons.
 
-### Prerequisites
-- Docker and Docker Compose
+**Commands** (`.claude/commands/`): The `/launch` command — a flat 7-step orchestrator with concrete tool calls.
 
-### 1. Clone and configure
+### Approach
 
-```bash
-git clone <repo-url> mcp-leadgen
-cd mcp-leadgen
-cp .env.example .env
-# Edit .env — set POSTGRES_PASSWORD and add your API keys
+Inspired by [claude-pipe](https://github.com/bluzir/claude-pipe) — the command IS the orchestrator. No framework, no daemon, no state machine. One flat command file with 7 steps. The AI agent reads it and executes. Skills provide domain knowledge at each step.
+
+### Pipeline Steps
+
+| Step | What happens | Human input |
+|------|-------------|:-----------:|
+| 1. Extract Offer | Scrape URL / read file / parse text → structured ICP | - |
+| 2. Generate Filters | Apollo taxonomy + keywords + probe (6 credits) | - |
+| 3. Strategy Approval | Show offer + filters + cost estimate | **Proceed?** |
+| 4. Gather + Classify | Apollo search → scrape → via negativa classify | - |
+| 5. Extract People | FREE search → PAID enrichment (1 credit/person) | - |
+| 6. Generate Sequence | 12-rule GOD_SEQUENCE or from document | - |
+| 7. Campaign Push | SmartLead DRAFT + test email + Google Sheet | **Activate?** |
+
+### Key Rules
+
+- **1 keyword per Apollo request** — 7x more unique companies vs combined
+- **Via negativa classification** — exclude non-targets, don't define targets (97% accuracy)
+- **Max 200 Apollo credits** per run (default, overridable)
+- **100 verified contacts** KPI (default, overridable)
+- **Plain text emails**, no tracking, 40% follow-up, Mon-Fri 9-18 target timezone
+
+## Tools (37)
+
+| Category | Count | Examples |
+|----------|:-----:|---------|
+| Config | 2 | `get_config`, `set_config` |
+| Projects | 6 | `create_project`, `save_data`, `load_data`, `find_campaign`, `get_project_costs` |
+| Blacklist | 3 | `blacklist_check`, `blacklist_add`, `blacklist_import` |
+| Apollo | 6 | `apollo_search_companies`, `apollo_search_people`, `apollo_enrich_people`, `apollo_get_taxonomy` |
+| Scraping | 1 | `scrape_website` |
+| SmartLead | 12 | `smartlead_create_campaign`, `smartlead_add_leads`, `smartlead_activate_campaign`, `smartlead_send_test_email` |
+| GetSales | 4 | `getsales_create_flow`, `getsales_add_leads`, `getsales_activate_flow` |
+| Google Sheets | 3 | `sheets_create`, `sheets_export_contacts`, `sheets_read` |
+
+## Data Storage
+
+All project data in `~/.gtm-mcp/projects/<slug>/`:
+
 ```
-
-### 2. Start services
-
-```bash
-docker compose up --build
+~/.gtm-mcp/
+├── config.yaml                  # API keys
+├── blacklist.json               # global domain blacklist
+├── filter_intelligence.json     # cross-run keyword quality scores
+└── projects/
+    └── easystaff-outreach/
+        ├── project.yaml         # offer, segments, ICP
+        ├── state.yaml           # pipeline phase progress
+        ├── contacts.json        # extracted contacts
+        ├── runs/
+        │   └── run-001.json     # complete execution record
+        └── campaigns/
+            └── payments-us/
+                ├── campaign.yaml
+                ├── sequence.yaml
+                └── replies.json
 ```
-
-### 3. Access the UI
-
-Open http://localhost:3000 — create an account, then configure your API keys on the Setup page.
-
-### 4. Connect your AI agent
-
-The MCP SSE endpoint is available at:
-```
-http://localhost:8002/mcp/sse?token=YOUR_MCP_TOKEN
-```
-
-Get your token from the Setup page after signing up.
-
-## API Keys
-
-Configure these on the Setup page (per-user, encrypted at rest):
-
-| Service | Purpose | Required |
-|---------|---------|----------|
-| **OpenAI** | Lead analysis & classification | Yes (or Gemini) |
-| **Apollo** | Company/people search | Yes |
-| **SmartLead** | Email campaign management | For outreach |
-| **Apify** | Website scraping (proxy) | For scraping |
-| **GetSales** | LinkedIn outreach automation | Optional |
-
-## All MCP Tools
-
-### Account (3)
-| Tool | Description |
-|------|-------------|
-| `get_context` | Get user state, active project, and auth via token |
-| `configure_integration` | Connect an external service (apollo, smartlead, openai, apify, getsales) |
-| `check_integrations` | List all connected integrations and their status |
-
-### Projects (5)
-| Tool | Description |
-|------|-------------|
-| `create_project` | Create project from website URL or strategy document |
-| `confirm_offer` | Approve or adjust the extracted offer (mandatory before gathering) |
-| `select_project` | Set active working project |
-| `list_projects` | List all projects |
-| `update_project` | Update project ICP or sender info |
-
-### Intent Parsing (1)
-| Tool | Description |
-|------|-------------|
-| `parse_gathering_intent` | Parse multi-segment queries (e.g. "IT consulting Miami AND fashion brands Italy") |
-
-### Pipeline — Gathering (7)
-| Tool | Description |
-|------|-------------|
-| `tam_gather` | Search Apollo with auto-generated 20+ keywords. PREVIEW mode probes Apollo and shows strategy; CONFIRM mode starts gathering |
-| `tam_blacklist_check` | Check gathered companies against existing campaigns |
-| `tam_pre_filter` | Deterministic pre-filtering (remove trash domains, too-small companies) |
-| `tam_scrape` | Scrape company websites (free, no credits) |
-| `tam_analyze` | GPT-4o-mini classifies companies via negativa. Supports custom prompts and multi-step chains |
-| `tam_explore` | Enrich top 5 targets to discover better Apollo filters (5 credits) |
-| `tam_enrich_from_examples` | Reverse-engineer Apollo filters from example domains |
-
-### Pipeline — Classification (2)
-| Tool | Description |
-|------|-------------|
-| `tam_re_analyze` | Re-classify companies with a better prompt (new iteration, previous results preserved) |
-| `tam_list_sources` | List available gathering sources with filter schemas |
-
-### Pipeline — Refinement (2)
-| Tool | Description |
-|------|-------------|
-| `refinement_status` | Get self-refinement run status: iterations, accuracy, patterns |
-| `refinement_override` | Accept current accuracy and stop refinement early |
-
-### Pipeline — Orchestration (6)
-| Tool | Description |
-|------|-------------|
-| `run_auto_pipeline` | Full autonomous pipeline: scrape → classify → extract people → auto-push to SmartLead |
-| `run_full_pipeline` | Full pipeline with checkpoints at each phase for manual approval |
-| `pipeline_status` | Live progress: phase, KPIs, timing, ETA, credits, campaign info |
-| `set_pipeline_kpi` | Change target contacts, companies, or max per company on a running pipeline |
-| `control_pipeline` | Pause or resume a running pipeline |
-| `set_people_filters` | Change which roles/titles to search for (VP Marketing, CTO, etc.) |
-
-### Pipeline — People (1)
-| Tool | Description |
-|------|-------------|
-| `extract_people` | Extract contacts from target companies (free Apollo mixed_people endpoint) |
-
-### SmartLead Email Campaigns (9)
-| Tool | Description |
-|------|-------------|
-| `smartlead_score_campaigns` | Score and rank campaigns by quality (warm reply rate, meetings) |
-| `smartlead_extract_patterns` | Extract reusable patterns from top-performing campaigns |
-| `smartlead_generate_sequence` | Generate 4-5 step email sequence for a campaign |
-| `smartlead_approve_sequence` | Mark a generated sequence as approved |
-| `smartlead_edit_sequence` | Edit a specific step (subject, body) of a sequence |
-| `smartlead_push_campaign` | Push approved sequence to SmartLead as DRAFT with full config |
-| `check_destination` | Check which outreach platforms are configured |
-| `align_email_accounts` | Select sending email accounts for the campaign (two-step: preview → confirm) |
-| `list_email_accounts` | List available SmartLead email accounts |
-
-### SmartLead Campaign Management (5)
-| Tool | Description |
-|------|-------------|
-| `send_test_email` | Send a test email to preview in your inbox |
-| `edit_campaign_accounts` | Change sending accounts on a campaign |
-| `activate_campaign` | START sending to real leads (requires explicit user confirmation) |
-| `list_smartlead_campaigns` | Browse SmartLead campaigns |
-| `import_smartlead_campaigns` | Import previous campaigns into blacklist |
-| `set_campaign_rules` | Save campaign detection rules for blacklisting |
-
-### GetSales LinkedIn Automation (5)
-| Tool | Description |
-|------|-------------|
-| `gs_generate_flow` | Generate LinkedIn automation flow (5 types: standard, networking, product, volume, event) |
-| `gs_approve_flow` | Approve a generated GetSales flow |
-| `gs_list_sender_profiles` | List available LinkedIn accounts |
-| `gs_push_to_getsales` | Push approved flow to GetSales as DRAFT |
-| `gs_activate_flow` | Activate flow — start sending LinkedIn requests (requires explicit confirmation) |
-
-### CRM (2)
-| Tool | Description |
-|------|-------------|
-| `query_contacts` | Search contacts with filters (replied, needs follow-up, category, pipeline) |
-| `crm_stats` | CRM statistics: total contacts by status, source, project |
-
-### Replies & Learning (4)
-| Tool | Description |
-|------|-------------|
-| `replies_summary` | Reply counts by category (interested, meeting, not_interested, OOO, etc.) |
-| `replies_list` | List/search replies filtered by category, project, or search |
-| `replies_followups` | List leads needing follow-up |
-| `replies_deep_link` | Generate browser URL to view specific replies |
-
-### Feedback & Editing (4)
-| Tool | Description |
-|------|-------------|
-| `provide_feedback` | Submit feedback (targets, filters, sequence, general) — triggers next action |
-| `override_company_target` | Override a company's target/not-target status with reasoning |
-| `estimate_cost` | Estimate credits needed before starting a run |
-| `blacklist_check` | Quick check: are these domains already in any campaign? |
-
-## Auto-Replies & Operator Learning
-
-The system includes a built-in learning loop for campaign replies:
-
-1. **Reply monitoring** — Background poller watches SmartLead campaigns for new replies (every 3 minutes)
-2. **AI classification** — Each reply is categorized (interested, meeting request, not interested, OOO, wrong person, etc.) using GPT-4o-mini
-3. **Draft generation** — AI drafts a response using Gemini 2.5 Pro based on the reply context
-4. **Operator review** — Operators approve or dismiss drafts on the Learning page (Actions tab)
-5. **Analytics** — The Learning page (Analytics tab) tracks approval rates, category breakdowns, and pipeline accuracy over time
-
-The operator's corrections feed back into the system, building a dataset of golden examples that improve future classifications and draft quality.
 
 ## Development
 
-### Run backend locally
 ```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+pip install -e ".[dev]"
+pytest tests/ -v
 ```
-
-### Run frontend locally
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend dev server runs on port 3000 with proxy to backend at 8002.
-
-## Environment Variables
-
-See `.env.example` for the full list. Key variables:
-
-| Variable | Description |
-|----------|-------------|
-| `POSTGRES_PASSWORD` | Database password |
-| `UI_BASE` | Frontend URL for links in tool responses |
-| `OPENAI_API_KEY` | System-level OpenAI key (fallback) |
-| `ENCRYPTION_KEY` | Key for encrypting stored API keys |
 
 ## License
 
