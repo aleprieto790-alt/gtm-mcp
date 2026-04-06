@@ -1,88 +1,517 @@
-"""SmartLead API tools — campaign CRUD, sequences, leads, replies."""
+"""SmartLead API tools — campaign CRUD, sequences, leads, replies, activation.
+
+Auth: api_key as QUERY PARAMETER ?api_key=xxx (not header).
+Base URL: https://server.smartlead.ai/api/v1
+Known bug: create sometimes returns "Plan expired!" — retry once with 2s delay.
+"""
 import asyncio
-from typing import Any, Optional
+import logging
+from datetime import datetime, timezone as tz
+from typing import Any
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 BASE_URL = "https://server.smartlead.ai/api/v1"
 
-
-async def _sl_get(api_key: str, path: str, params: dict | None = None) -> dict:
-    params = params or {}
-    params["api_key"] = api_key
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{BASE_URL}{path}", params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _sl_post(api_key: str, path: str, data: dict) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{BASE_URL}{path}",
-            params={"api_key": api_key},
-            json=data,
-        )
-        resp.raise_for_status()
-        return resp.json()
+COUNTRY_TIMEZONES: dict[str, str] = {
+    "US": "America/New_York", "UK": "Europe/London", "DE": "Europe/Berlin",
+    "FR": "Europe/Paris", "AU": "Australia/Sydney", "IN": "Asia/Kolkata",
+    "SG": "Asia/Singapore", "JP": "Asia/Tokyo", "BR": "America/Sao_Paulo",
+    "CA": "America/Toronto", "NL": "Europe/Amsterdam", "SE": "Europe/Stockholm",
+    "IL": "Asia/Jerusalem", "AE": "Asia/Dubai", "HK": "Asia/Hong_Kong",
+    "KR": "Asia/Seoul", "MX": "America/Mexico_City", "AR": "America/Buenos_Aires",
+    "ZA": "Africa/Johannesburg", "PL": "Europe/Warsaw", "IT": "Europe/Rome",
+    "ES": "Europe/Madrid", "CH": "Europe/Zurich",
+    # Extended from magnum-opus reference
+    "AT": "Europe/Vienna", "BE": "Europe/Brussels", "NG": "Africa/Lagos",
+    "PH": "Asia/Manila", "RU": "Europe/Moscow", "TR": "Europe/Istanbul",
+    "SA": "Asia/Riyadh", "QA": "Asia/Qatar", "KW": "Asia/Kuwait",
+    "CZ": "Europe/Prague", "RO": "Europe/Bucharest", "UA": "Europe/Kyiv",
+}
 
 
-async def smartlead_list_campaigns(api_key: str) -> dict:
-    data = await _sl_get(api_key, "/campaigns")
-    campaigns = []
-    for c in (data if isinstance(data, list) else []):
-        campaigns.append({
-            "id": c.get("id"),
-            "name": c.get("name", ""),
-            "status": c.get("status", ""),
-            "created_at": c.get("created_at", ""),
-        })
-    return {"success": True, "campaigns": campaigns}
+async def _api_call(method: str, endpoint: str, api_key: str, *,
+                    json_data: dict | None = None, params: dict | None = None) -> Any:
+    p = dict(params or {})
+    p["api_key"] = api_key
+    url = f"{BASE_URL}{endpoint}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            if method == "POST":
+                resp = await client.post(url, json=json_data, params=p)
+            elif method == "PATCH":
+                resp = await client.patch(url, json=json_data, params=p)
+            else:
+                resp = await client.get(url, params=p)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        logger.error("SmartLead %s %s → %s: %s", method, endpoint,
+                      exc.response.status_code, exc.response.text[:300])
+        return None
+    except Exception as exc:
+        logger.error("SmartLead %s %s failed: %s", method, endpoint, exc)
+        return None
 
 
-async def smartlead_create_campaign(api_key: str, name: str) -> dict:
-    data = await _sl_post(api_key, "/campaigns/create", {"name": name})
-    return {"success": True, "campaign_id": data.get("id"), "name": name}
+# ---------------------------------------------------------------------------
+# List campaigns
+# ---------------------------------------------------------------------------
+
+async def smartlead_list_campaigns(*, config=None) -> dict:
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    data = await _api_call("GET", "/campaigns", api_key)
+    if data is None:
+        return {"success": False, "error": "SmartLead API request failed"}
+    campaigns = data if isinstance(data, list) else []
+    return {"success": True, "data": campaigns}
 
 
-async def smartlead_set_sequence(api_key: str, campaign_id: int, sequences: list[dict]) -> dict:
-    data = await _sl_post(api_key, f"/campaigns/{campaign_id}/sequences", {"sequences": sequences})
-    return {"success": True, "campaign_id": campaign_id}
+# ---------------------------------------------------------------------------
+# Get campaign by ID — validate existing campaign for reuse
+# ---------------------------------------------------------------------------
+
+async def smartlead_get_campaign(campaign_id: int, *, config=None) -> dict:
+    """Get campaign details by ID. Used to validate campaign exists for append mode."""
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    data = await _api_call("GET", f"/campaigns/{campaign_id}", api_key)
+    if data is None:
+        return {"success": False, "error": f"Campaign {campaign_id} not found or API failed"}
+
+    # Also fetch assigned email accounts
+    accounts = await _api_call("GET", f"/campaigns/{campaign_id}/email-accounts", api_key)
+    account_ids = []
+    if accounts and isinstance(accounts, list):
+        account_ids = [a.get("id") for a in accounts if a.get("id")]
+
+    # Fetch sequences
+    sequences = await _api_call("GET", f"/campaigns/{campaign_id}/sequences", api_key)
+
+    campaign = {
+        "campaign_id": campaign_id,
+        "name": data.get("name", ""),
+        "status": data.get("status", ""),
+        "created_at": data.get("created_at", ""),
+        "sending_account_ids": account_ids,
+        "sequences": sequences if isinstance(sequences, list) else [],
+    }
+    return {"success": True, "data": campaign}
 
 
-async def smartlead_add_leads(api_key: str, campaign_id: int, leads: list[dict]) -> dict:
-    data = await _sl_post(api_key, f"/campaigns/{campaign_id}/leads", {"lead_list": leads})
-    return {"success": True, "campaign_id": campaign_id, "leads_added": len(leads)}
+# ---------------------------------------------------------------------------
+# Export leads from campaign — for dedup on append
+# ---------------------------------------------------------------------------
+
+async def smartlead_export_leads(campaign_id: int, *, config=None) -> dict:
+    """Export all leads from a campaign as structured data.
+
+    Returns email + domain for every lead. Used to dedup when
+    appending new contacts to an existing campaign.
+    """
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(
+                f"{BASE_URL}/campaigns/{campaign_id}/leads-export",
+                params={"api_key": api_key},
+            )
+            if resp.status_code != 200:
+                return {"success": False, "error": f"Export failed: HTTP {resp.status_code}"}
+
+            import csv
+            import io
+            text = resp.text
+            if not text.strip():
+                return {"success": True, "data": {"campaign_id": campaign_id,
+                        "leads": [], "count": 0, "domains": []}}
+
+            reader = csv.DictReader(io.StringIO(text))
+            leads = []
+            domains = set()
+            for row in reader:
+                email = row.get("email", "").strip()
+                if not email:
+                    continue
+                domain = email.split("@")[1] if "@" in email else ""
+                leads.append({
+                    "email": email,
+                    "first_name": row.get("first_name", ""),
+                    "last_name": row.get("last_name", ""),
+                    "company_name": row.get("company_name", ""),
+                    "domain": domain,
+                })
+                if domain:
+                    domains.add(domain)
+
+            return {"success": True, "data": {
+                "campaign_id": campaign_id,
+                "leads": leads,
+                "count": len(leads),
+                "domains": sorted(domains),
+            }}
+    except Exception as exc:
+        logger.error("SmartLead export %s failed: %s", campaign_id, exc)
+        return {"success": False, "error": str(exc)}
 
 
-async def smartlead_list_accounts(api_key: str) -> dict:
-    data = await _sl_get(api_key, "/email-accounts")
-    accounts = []
-    for a in (data if isinstance(data, list) else []):
-        accounts.append({
-            "id": a.get("id"),
-            "from_email": a.get("from_email", ""),
-            "from_name": a.get("from_name", ""),
-        })
-    return {"success": True, "accounts": accounts, "count": len(accounts)}
+# ---------------------------------------------------------------------------
+# List email accounts — PAGINATED (handles 2000+ accounts)
+# ---------------------------------------------------------------------------
+
+async def smartlead_list_accounts(*, config=None) -> dict:
+    """Load ALL SmartLead email accounts with pagination.
+
+    SmartLead returns max 100 per call. With 2000+ accounts,
+    this loops through all pages using offset parameter.
+    """
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    all_accounts: list[dict] = []
+    offset = 0
+    while True:
+        data = await _api_call("GET", "/email-accounts", api_key,
+                               params={"offset": offset, "limit": 100})
+        if data is None:
+            break
+        entries = data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
+        if not entries:
+            break
+        all_accounts.extend(entries)
+        if len(entries) < 100:
+            break  # last page
+        offset += 100
+
+    accounts = [{
+        "id": a.get("id"),
+        "from_email": a.get("from_email", ""),
+        "from_name": a.get("from_name", ""),
+        "warmup_status": a.get("warmup_status", ""),
+    } for a in all_accounts]
+
+    return {"success": True, "data": accounts, "count": len(accounts)}
 
 
-async def smartlead_sync_replies(api_key: str, campaign_id: int) -> dict:
-    data = await _sl_get(api_key, f"/campaigns/{campaign_id}/statistics")
-    replied = [
-        lead for lead in (data if isinstance(data, list) else [])
-        if lead.get("lead_status") == "REPLIED"
-    ]
-    return {"success": True, "campaign_id": campaign_id, "replied_count": len(replied), "leads": replied}
+# ---------------------------------------------------------------------------
+# Create campaign (5-step chain)
+# ---------------------------------------------------------------------------
+
+async def smartlead_create_campaign(
+    project: str, name: str, sending_account_ids: list[int],
+    country: str = "US", segment: str = "", *, config=None, workspace=None,
+) -> dict:
+    """Create campaign with schedule, settings, and email accounts.
+
+    5 API calls: create → schedule → settings → email accounts → save locally.
+    segment: target segment label (e.g. "PAYMENTS") — stored in campaign.yaml for tracking.
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    if not sending_account_ids:
+        return {"success": False, "error": "sending_account_ids must not be empty"}
+
+    timezone = COUNTRY_TIMEZONES.get(country.upper(), "UTC")
+
+    # Step 1: create (retry once for "Plan expired!" bug)
+    create_data = await _api_call("POST", "/campaigns/create", api_key,
+                                   json_data={"name": name})
+    if create_data is None or (isinstance(create_data, dict) and "Plan expired" in str(create_data)):
+        await asyncio.sleep(2)
+        create_data = await _api_call("POST", "/campaigns/create", api_key,
+                                       json_data={"name": name})
+    if create_data is None:
+        return {"success": False, "error": "Failed to create campaign"}
+
+    campaign_id = create_data.get("id") if isinstance(create_data, dict) else None
+    if not campaign_id:
+        return {"success": False, "error": f"No campaign ID: {create_data}"}
+
+    # Step 2: schedule (Mon-Fri 9-18 target timezone)
+    await _api_call("POST", f"/campaigns/{campaign_id}/schedule", api_key,
+                    json_data={"timezone": timezone, "days_of_the_week": [1, 2, 3, 4, 5],
+                               "start_hour": "09:00", "end_hour": "18:00",
+                               "min_time_btw_emails": 3, "max_new_leads_per_day": 1500})
+
+    # Step 3: settings (plain text, no tracking, stop on reply, AI ESP matching)
+    await _api_call("POST", f"/campaigns/{campaign_id}/settings", api_key,
+                    json_data={"track_settings": [],
+                               "stop_lead_settings": "REPLY_TO_AN_EMAIL",
+                               "send_as_plain_text": True, "follow_up_percentage": 40,
+                               "enable_ai_esp_matching": True})
+
+    # Step 4: assign email accounts
+    await _api_call("POST", f"/campaigns/{campaign_id}/email-accounts", api_key,
+                    json_data={"email_account_ids": sending_account_ids})
+
+    # Step 5: save locally
+    slug = name.lower().replace(" ", "-").replace("—", "-")
+    campaign_data = {
+        "campaign_id": campaign_id, "name": name, "slug": slug,
+        "project": project, "segment": segment,
+        "country": country.upper(), "timezone": timezone,
+        "sending_account_ids": sending_account_ids, "status": "DRAFT",
+        "run_ids": [], "total_leads_pushed": 0,
+        "created_at": datetime.now(tz.utc).isoformat(),
+    }
+    workspace.save(project, f"campaigns/{slug}/campaign.yaml", campaign_data)
+
+    return {"success": True, "data": campaign_data}
 
 
-async def smartlead_send_reply(api_key: str, campaign_id: int, lead_id: int, body: str) -> dict:
-    data = await _sl_post(api_key, f"/campaigns/{campaign_id}/leads/{lead_id}/reply", {"body": body})
+# ---------------------------------------------------------------------------
+# Set sequence
+# ---------------------------------------------------------------------------
+
+async def smartlead_set_sequence(
+    project: str, campaign_slug: str, campaign_id: int, steps: list[dict],
+    *, config=None, workspace=None,
+) -> dict:
+    """Save sequence locally then push to SmartLead.
+
+    Each step: {step, day, subject, body, subject_b?}
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    if not steps:
+        return {"success": False, "error": "steps must not be empty"}
+
+    # Save locally
+    workspace.save(project, f"campaigns/{campaign_slug}/sequence.yaml",
+                        {"campaign_id": campaign_id, "steps": steps})
+
+    # Format for SmartLead API
+    sl_sequences = []
+    for i, step in enumerate(steps):
+        body = step.get("body", "")
+        # Auto-convert \n to <br> for SmartLead HTML rendering
+        if body and "<br" not in body and "\n" in body:
+            body = body.replace("\n", "<br>")
+        seq = {
+            "seq_number": step.get("step", i + 1),
+            "seq_delay_details": {"delay_in_days": step.get("day", i * 3)},
+            "subject": step.get("subject", ""),
+            "email_body": body,
+        }
+        sl_sequences.append(seq)
+
+    result = await _api_call("POST", f"/campaigns/{campaign_id}/sequences", api_key,
+                             json_data={"sequences": sl_sequences})
+
+    # A/B variants via separate API call (SmartLead doesn't accept inline variants)
+    for i, step in enumerate(steps):
+        if step.get("subject_b") or step.get("body_b"):
+            # Fetch sequence IDs to find the right one
+            seqs_data = await _api_call("GET", f"/campaigns/{campaign_id}/sequences", api_key)
+            if seqs_data and isinstance(seqs_data, list):
+                seq_id = None
+                for s in seqs_data:
+                    if s.get("seq_number") == step.get("step", i + 1):
+                        seq_id = s.get("id")
+                        break
+                if seq_id:
+                    variant_body = step.get("body_b", step.get("body", ""))
+                    if variant_body and "<br" not in variant_body and "\n" in variant_body:
+                        variant_body = variant_body.replace("\n", "<br>")
+                    await _api_call("POST",
+                                    f"/campaigns/{campaign_id}/sequences/{seq_id}/variants",
+                                    api_key,
+                                    json_data={
+                                        "variant_label": "B",
+                                        "subject": step.get("subject_b", step.get("subject", "")),
+                                        "email_body": variant_body,
+                                    })
+
+    return {"success": True, "data": {"campaign_id": campaign_id, "steps_count": len(steps)}}
+
+
+# ---------------------------------------------------------------------------
+# Add leads
+# ---------------------------------------------------------------------------
+
+async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=None) -> dict:
+    """Add leads to a campaign. Each lead: {email, first_name, last_name, company_name, custom_fields?}"""
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    # Format leads for SmartLead
+    lead_list = []
+    for lead in leads:
+        entry = {
+            "email": lead["email"],
+            "first_name": lead.get("first_name", ""),
+            "last_name": lead.get("last_name", ""),
+            "company_name": lead.get("company_name", ""),
+        }
+        if lead.get("custom_fields"):
+            entry["custom_fields"] = lead["custom_fields"]
+        lead_list.append(entry)
+
+    data = await _api_call("POST", f"/campaigns/{campaign_id}/leads", api_key,
+                           json_data={"lead_list": lead_list})
+    return {"success": True, "data": {"campaign_id": campaign_id, "leads_added": len(lead_list)}}
+
+
+# ---------------------------------------------------------------------------
+# Sync replies
+# ---------------------------------------------------------------------------
+
+async def smartlead_sync_replies(
+    project: str, campaign_slug: str, campaign_id: int,
+    *, config=None, workspace=None,
+) -> dict:
+    """Sync replied leads from campaign. Saves replies.json to workspace."""
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    data = await _api_call("GET", f"/campaigns/{campaign_id}/statistics", api_key)
+    replied = [l for l in (data if isinstance(data, list) else [])
+               if l.get("lead_status") == "REPLIED"]
+
+    # Save locally
+    workspace.save(project, f"campaigns/{campaign_slug}/replies.json",
+                        replied, mode="write")
+
+    return {"success": True, "data": {"campaign_id": campaign_id,
+            "replied_count": len(replied), "leads": replied}}
+
+
+# ---------------------------------------------------------------------------
+# Send reply
+# ---------------------------------------------------------------------------
+
+async def smartlead_send_reply(campaign_id: int, lead_id: int, body: str, *, config=None) -> dict:
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    await _api_call("POST", f"/campaigns/{campaign_id}/leads/{lead_id}/reply", api_key,
+                    json_data={"body": body})
     return {"success": True}
 
 
-async def smartlead_activate_campaign(api_key: str, campaign_id: int, confirm: str) -> dict:
+# ---------------------------------------------------------------------------
+# Activate campaign
+# ---------------------------------------------------------------------------
+
+async def smartlead_activate_campaign(campaign_id: int, confirm: str, *, config=None) -> dict:
+    """Activate campaign. confirm must be exactly 'I confirm'."""
     if confirm != "I confirm":
         return {"success": False, "error": "Must pass confirm='I confirm' to activate"}
-    data = await _sl_post(api_key, f"/campaigns/{campaign_id}/status", {"status": "START"})
-    return {"success": True, "campaign_id": campaign_id, "status": "ACTIVE"}
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    await _api_call("POST", f"/campaigns/{campaign_id}/status", api_key,
+                    json_data={"status": "START"})
+    return {"success": True, "data": {"campaign_id": campaign_id, "status": "ACTIVE"}}
+
+
+# ---------------------------------------------------------------------------
+# Pause campaign
+# ---------------------------------------------------------------------------
+
+async def smartlead_pause_campaign(campaign_id: int, confirm: str, *, config=None) -> dict:
+    """Pause an active campaign. confirm must be exactly 'I confirm'."""
+    if confirm != "I confirm":
+        return {"success": False, "error": "Must pass confirm='I confirm' to pause"}
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+    await _api_call("POST", f"/campaigns/{campaign_id}/status", api_key,
+                    json_data={"status": "PAUSE"})
+    return {"success": True, "data": {"campaign_id": campaign_id, "status": "PAUSED"}}
+
+
+# ---------------------------------------------------------------------------
+# Send test email
+# ---------------------------------------------------------------------------
+
+async def smartlead_send_test_email(
+    campaign_id: int, test_email: str, sequence_number: int = 1,
+    *, config=None,
+) -> dict:
+    """Send a test email from a campaign to verify sequence before activation.
+
+    Requires at least one lead and one email account on the campaign.
+    Auto-resolves account and lead if not provided.
+    """
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    # Auto-resolve email account (first assigned)
+    accounts = await _api_call("GET", f"/campaigns/{campaign_id}/email-accounts", api_key)
+    if not accounts or not isinstance(accounts, list) or not accounts:
+        return {"success": False, "error": "No email accounts on this campaign"}
+    email_account_id = accounts[0].get("id")
+
+    # Auto-resolve lead (first in campaign, for variable substitution)
+    leads = await _api_call("GET", f"/campaigns/{campaign_id}/leads", api_key,
+                            params={"limit": 1, "offset": 0})
+    lead_id = None
+    if isinstance(leads, list) and leads:
+        lead_obj = leads[0].get("lead", leads[0])
+        lead_id = lead_obj.get("id")
+    elif isinstance(leads, dict):
+        entries = leads.get("data", leads.get("leads", []))
+        if entries:
+            lead_obj = entries[0].get("lead", entries[0])
+            lead_id = lead_obj.get("id")
+    if not lead_id:
+        return {"success": False, "error": "No leads in campaign for variable substitution"}
+
+    result = await _api_call("POST", f"/campaigns/{campaign_id}/send-test-email", api_key,
+                             json_data={
+                                 "leadId": lead_id,
+                                 "sequenceNumber": sequence_number,
+                                 "selectedEmailAccountId": email_account_id,
+                                 "customEmailAddress": test_email,
+                             })
+    if result and isinstance(result, dict) and result.get("status") == "success":
+        return {"success": True, "data": {
+            "test_email": test_email, "from_account_id": email_account_id,
+            "lead_id": lead_id, "sequence_number": sequence_number,
+            "message_id": result.get("messageId"),
+        }}
+    return {"success": False, "error": str(result), "test_email": test_email}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _default_config():
+    from gtm_mcp.config import ConfigManager
+    return ConfigManager()
+
+def _default_workspace():
+    from gtm_mcp.workspace import WorkspaceManager
+    return WorkspaceManager(_default_config().dir)

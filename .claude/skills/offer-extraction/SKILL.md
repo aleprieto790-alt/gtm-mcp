@@ -11,9 +11,20 @@ Extract structured ICP (Ideal Customer Profile) from a website URL, strategy doc
 
 ## Input Sources
 
-### Website URL
-1. Call `scrape_website` tool with the URL
-2. Analyze the scraped text below
+### Website URL (3-Layer Fallback)
+
+**Layer 1**: Call `scrape_website` tool with the URL (Apify residential proxy, 15s timeout)
+- If success and text_length > 200 → proceed to extraction
+
+**Layer 2**: If Layer 1 fails → call `scrape_website` again without proxy (direct HTTP + meta extraction)
+- Falls back to `http://` if `https://` fails (SSL error)
+
+**Layer 3**: If both fail OR text too short (<200 chars) → extract from GPT knowledge
+- Use domain name + any partial text obtained
+- Mark `_source: "gpt_knowledge"` (lower confidence)
+- GPT can infer company type from well-known domains (stripe.com → payments)
+
+After ANY layer succeeds: analyze the scraped text to extract offer_summary.
 
 ### Strategy Document
 1. Claude Code reads the file from disk (user provides filename)
@@ -161,62 +172,28 @@ Valid formats: "1,10", "11,50", "51,200", "201,500", "501,1000", "1001,5000", "5
 - Funded companies are searched FIRST, then unfunded as fallback
 - Valid values: "seed", "angel", "series_a", "series_b", "series_c", "series_d", "series_e", "ipo"
 
+## Exclusion List — Competitor Conquest Caveat
+
+If the document describes targeting users of competing vendors (e.g. a "competitor conquest" sequence), those competing vendors' CLIENTS are high-intent TARGETS, not exclusions. Only list companies the document EXPLICITLY says to avoid, skip, or never contact.
+
 ## Multi-Segment Handling
 
 When multiple segments are found:
 1. Ask user: "I found N segments. Launch as 1 campaign or N separate?"
-2. If "one campaign": merge all segment keywords, classification prompt includes ALL segments
+2. If "one campaign": merge all segment keywords, classification prompt includes ALL segments as possible categories
 3. If "separate": create separate pipeline per segment
 
-## Seed Data from Example Companies
+## Offer Confirmation & Feedback Re-extraction
 
-When user provides example companies (domains) instead of a document:
+After extraction, present to user and ask: "Does this look right?"
 
-**Trigger**: User says "companies like nike.com, adidas.com" or provides example domains
+**If user approves**: Set `offer_approved: true` on the project. Proceed to email accounts → filter generation → pipeline.
 
-**Flow**:
-1. Enrich each domain via `apollo_search_companies` (1 credit each)
-2. Apollo returns per-company: `industry`, `industry_tag_id`, `keywords[]`
-3. Aggregate common patterns across all examples (no LLM needed):
-   - industry_tag_ids: most frequent across examples
-   - keywords: most frequent (top 15)
-   - industries: most frequent (top 10)
-   - sic_codes: most frequent (top 5)
-4. Prioritize keywords (LLM): filter raw keywords to keep only segment-relevant ones (max 8). Exclude tech stacks, product names, frameworks.
-5. Prioritize industry tag_ids (LLM): select 2-3 most relevant from those found on examples, map to tag_ids.
-6. Store as `seed_data`:
-```json
-{
-  "keywords": ["apparel", "fashion brand", ...],
-  "industry_tag_ids": ["5567cd82...", ...],
-  "example_domains": ["nike.com", "adidas.com"],
-  "source": "examples"
-}
-```
+**If user provides feedback** (e.g. "wrong roles", "also target CMOs", "size should be 200-5000"):
+1. Re-run extraction with the ORIGINAL input + user feedback as additional context
+2. Merge: keep what user didn't object to, update what they corrected
+3. Present updated offer_summary to user again
+4. Max 3 re-extraction cycles — if user keeps correcting, accept on 3rd attempt and note "offer confirmed after 3 revisions"
+5. Each re-extraction preserves the original `_source` but adds `feedback_applied: true`
 
-**How seeds are consumed**: 
-- seed_keywords → passed as hints to keyword generation (LLM decides which are relevant for THIS query)
-- seed_tag_ids → merged with filter-mapper's industry_tag_ids (union, no dupes)
-- Seeds from "nike.com" help "fashion brands" but LLM ignores "athletic footwear" for "luxury brands"
-
-## Website Scraping Fallback Layers
-
-When extracting offer from a URL, use 3 fallback layers:
-1. **Layer 1**: Apify residential proxy scrape (15s timeout)
-2. **Layer 2**: Direct HTTP + meta extraction (fallback if Apify fails)
-3. **Layer 3**: LLM analysis — always runs on whatever text was obtained
-- If no text at all → `_source: "gpt_knowledge"` (LLM infers from domain name)
-
-## Company Name Normalization
-
-When storing companies and pushing to SmartLead:
-- Normalize company names (strip "Inc.", "LLC", "Ltd.", etc.)
-- Store normalized name alongside original
-- Pass normalized name as custom field in SmartLead contacts
-
-## After Extraction
-
-1. Present extracted data to user for confirmation
-2. If user provides feedback → re-extract with feedback as context
-3. Once confirmed → set offer_approved = true
-4. Proceed to email account alignment → filter generation → pipeline
+**Key rule**: Never silently skip fields. If extraction missed something (no sequences, no exclusions), that's OK — silently skip what can't be automated. But if user CORRECTS a field, that correction is absolute.

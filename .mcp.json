@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "gtm": {
-      "command": "gtm-mcp",
+      "command": "uv",
+      "args": ["run", "gtm-mcp"],
       "autoApprove": [
         "get_config",
         "list_projects",

@@ -183,6 +183,18 @@ Store feedback and apply to ALL future sequence generations for this project.
 | Thailand | Asia/Bangkok |
 | Nigeria | Africa/Lagos |
 
+## Timezone Detection Fallback
+
+When setting campaign schedule timezone:
+
+1. **Contact has country in 23-country map** → use mapped timezone (table above)
+2. **Contact has country NOT in map** → look up the country's capital city timezone (e.g., "Colombia" → "America/Bogota")
+3. **Contact has city but no country** → infer timezone from city name
+4. **No location data at all** → default to `America/New_York` (most common B2B timezone)
+5. **Mixed countries in campaign** → use the MOST COMMON country among contacts as campaign timezone
+
+**Rule**: Never ask user about timezone. Always auto-detect with graceful fallback. The default `America/New_York` is safe — 9am-6pm ET covers most US business hours.
+
 ## Document-Provided Sequences
 
 If the strategy document includes email sequences:

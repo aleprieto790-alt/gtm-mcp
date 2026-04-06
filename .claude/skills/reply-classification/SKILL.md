@@ -156,6 +156,46 @@ Set `needs_reply: true` for:
 
 These are the replies that need human attention.
 
+## Draft Response Generation
+
+For warm replies (interested, meeting_request, question), generate a draft response. The calling agent (Claude) writes the draft — no specific model required.
+
+### Draft Rules
+
+1. **Reference the reply**: Address what they specifically said. Never generic.
+2. **Address their intent**: If they asked a question, answer it. If they want a meeting, offer times.
+3. **Include project context**: Reference what we sell, relevant case study or metric from the offer.
+4. **Concise**: 3-5 sentences max. Match the brevity of cold email style.
+5. **Include CTA**: Suggest a specific next step:
+   - Interested → "Want me to send a comparison sheet?" or "Free for a 15-min call this week?"
+   - Meeting request → "How about [day] at [time]? Here's my calendar: [link]"
+   - Question → Answer + "Happy to jump on a quick call to walk through this"
+6. **Match tone**: If original sequence was casual, draft should be casual. If formal, stay formal.
+7. **No re-pitch**: They already replied — don't re-sell. Acknowledge their interest and move forward.
+8. **SmartLead format**: Use `smartlead_send_reply` tool. Draft goes as plain text reply to the thread.
+
+### Draft Output Format
+
+```json
+{
+  "lead_email": "john@company.com",
+  "lead_name": "John Smith",
+  "campaign_id": "123456",
+  "draft": "Hi John,\n\nGreat to hear from you! ...",
+  "category": "interested",
+  "suggested_action": "Send pricing comparison",
+  "approved": false
+}
+```
+
+### Draft Approval Flow
+
+1. Generate drafts for ALL warm replies in batch
+2. Present each draft to user: "Draft for John Smith (Acme Corp): ..."
+3. User can: approve, edit, skip, or dismiss
+4. Approved drafts → call `smartlead_send_reply` for each
+5. Track: approved vs dismissed for learning
+
 ## Operator Learning Flow
 
 Track approved/dismissed reply drafts to improve over time:

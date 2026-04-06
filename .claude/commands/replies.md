@@ -93,16 +93,30 @@ Auto-filtered: 13
 Classification: Tier 1 FREE: 13 | Tier 2 FREE: 12 | Tier 3 LLM: 20
 ```
 
-## Draft Response (Optional)
+## Phase 3: Draft Response Generation
 
-For warm replies, offer to draft a response:
-- "Want me to draft responses for the 8 warm replies?"
-- If yes → generate personalized response for each based on:
-  - Their reply content
-  - Project offer context
-  - Their company/role
-- Present drafts for approval
-- On approve → call `smartlead_send_reply` for each
+After triage, automatically offer to draft responses for warm replies.
+
+### Flow
+1. "I found {N} warm replies. Want me to draft responses?"
+2. If yes → generate drafts using rules from reply-classification skill (Draft Response Generation section):
+   - Reference their specific reply content
+   - Include project context (offer, case studies, metrics)
+   - 3-5 sentences max, matching sequence tone
+   - Specific CTA per reply type (meeting → calendar, question → answer + call offer)
+   - No re-pitching — acknowledge interest and move forward
+3. Present ALL drafts at once for batch review:
+   ```
+   Draft 1/8: John Smith (Acme Corp) — interested
+   "Hi John, Great to hear from you! [draft]..."
+   → [approve] [edit] [skip]
+   
+   Draft 2/8: Jane Doe (TechCo) — meeting_request
+   "Hi Jane, Thursday at 2pm works for me! [draft]..."
+   → [approve] [edit] [skip]
+   ```
+4. On batch approve → call `smartlead_send_reply` for each approved draft
+5. Track approved/dismissed ratio for operator learning
 
 ## Ongoing Monitoring
 

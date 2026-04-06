@@ -31,3 +31,13 @@ Summary stats: total, warm_count, needs_reply_count, by_category, tier_stats
 ## Channel Support
 - Email (SmartLead): fully supported
 - LinkedIn (GetSales): planned, not yet implemented
+
+## Silence Protocol
+
+When invoked as a background worker (via Task tool or autonomous scheduling):
+- Produce no conversational output
+- Write all results via `save_data` tool calls
+- Include execution metadata (_execution block)
+
+When invoked directly (via /replies command):
+- Normal conversational output with triage report

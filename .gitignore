@@ -1,5 +1,6 @@
 # Environment & secrets
 .env
+google-credentials.json
 *.pem
 *.key
 
@@ -31,3 +32,5 @@ Thumbs.db
 # Data
 *.csv
 *.xlsx
+plans/
+requirements/

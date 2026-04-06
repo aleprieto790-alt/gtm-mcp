@@ -1,4 +1,4 @@
-"""GTM-MCP Server — 27 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 37 thin tools, zero LLM calls. stdio transport via FastMCP."""
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -72,6 +72,68 @@ async def load_data(project: str, name: str) -> dict:
     if data is None:
         return {"success": False, "error": f"File {name} not found in project {project}"}
     return {"success": True, "data": data}
+
+
+@mcp.tool()
+async def find_campaign(campaign_ref: str) -> dict:
+    """Find a campaign by SmartLead ID or slug across all projects.
+
+    Use when the user provides a campaign= parameter and you need to
+    resolve which project it belongs to.
+    """
+    result = _workspace.find_campaign(campaign_ref)
+    if result is None:
+        return {"success": False, "error": f"Campaign '{campaign_ref}' not found in any project"}
+    return {"success": True, "data": result}
+
+
+@mcp.tool()
+async def get_project_costs(project: str) -> dict:
+    """Get cost breakdown for a project — totals, per-campaign, and per-run.
+
+    Scans all run files and aggregates: credits (search + people), USD,
+    companies gathered, contacts extracted. Grouped by campaign.
+    """
+    return {"success": True, "data": _workspace.get_project_costs(project)}
+
+
+# ─── Google Sheets Tools ─────────────────────────────────────────────────────
+
+@mcp.tool()
+async def sheets_create(title: str, share_with: str = "") -> dict:
+    """Create a Google Sheet on Shared Drive with standard contact headers.
+
+    Returns sheet_id and sheet_url. Optionally shares with an email (editor).
+    Requires GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_SHARED_DRIVE_ID in .env.
+    """
+    from gtm_mcp.tools.sheets import sheets_create as _impl
+    return await _impl(title, share_with, config=_config)
+
+
+@mcp.tool()
+async def sheets_export_contacts(
+    project: str, campaign_slug: str = "", sheet_id: str = "",
+) -> dict:
+    """Export project contacts to a Google Sheet.
+
+    If sheet_id provided → appends to existing sheet.
+    If not → creates new sheet, returns URL.
+    If campaign_slug → filters contacts by that campaign's segment.
+    """
+    from gtm_mcp.tools.sheets import sheets_export_contacts as _impl
+    return await _impl(project, campaign_slug, sheet_id,
+                       config=_config, workspace=_workspace)
+
+
+@mcp.tool()
+async def sheets_read(sheet_id: str, tab: str = "Sheet1") -> dict:
+    """Read all data from a Google Sheet tab as list of dicts.
+
+    Use for: importing blacklist domains from a sheet, reading company lists,
+    or any structured data the user has in Google Sheets.
+    """
+    from gtm_mcp.tools.sheets import sheets_read as _impl
+    return await _impl(sheet_id, tab, config=_config)
 
 
 # ─── Blacklist Tools ──────────────────────────────────────────────────────────
@@ -197,81 +259,132 @@ async def scrape_website(url: str) -> dict:
 @mcp.tool()
 async def smartlead_list_campaigns() -> dict:
     """List all SmartLead campaigns."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
     from gtm_mcp.tools.smartlead import smartlead_list_campaigns as _impl
-    return await _impl(api_key)
+    return await _impl(config=_config)
 
 
 @mcp.tool()
-async def smartlead_create_campaign(name: str) -> dict:
-    """Create a SmartLead campaign (DRAFT)."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+async def smartlead_create_campaign(
+    project: str, name: str, sending_account_ids: list[int],
+    country: str = "US", segment: str = "",
+) -> dict:
+    """Create a SmartLead campaign with schedule, settings, and email accounts.
+
+    Chains 5 API calls: create → schedule (timezone from country, 09-18 Mon-Fri) →
+    settings (plain text, no tracking, stop on reply, 40% follow-up, AI ESP matching) →
+    assign accounts → save locally.
+    Campaign is always DRAFT — use smartlead_activate_campaign to start sending.
+    """
     from gtm_mcp.tools.smartlead import smartlead_create_campaign as _impl
-    return await _impl(api_key, name)
+    return await _impl(project, name, sending_account_ids, country,
+                       segment=segment, config=_config, workspace=_workspace)
 
 
 @mcp.tool()
-async def smartlead_set_sequence(campaign_id: int, sequences: list[dict]) -> dict:
-    """Set email sequence on a SmartLead campaign."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+async def smartlead_set_sequence(
+    project: str, campaign_slug: str, campaign_id: int, steps: list[dict],
+) -> dict:
+    """Set email sequence steps for a SmartLead campaign.
+
+    Saves sequence.yaml locally first, then pushes to SmartLead.
+    Each step: {step, day, subject, body, subject_b?}
+    """
     from gtm_mcp.tools.smartlead import smartlead_set_sequence as _impl
-    return await _impl(api_key, campaign_id, sequences)
+    return await _impl(project, campaign_slug, campaign_id, steps,
+                       config=_config, workspace=_workspace)
 
 
 @mcp.tool()
 async def smartlead_add_leads(campaign_id: int, leads: list[dict]) -> dict:
-    """Add leads to a SmartLead campaign."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+    """Add leads to a SmartLead campaign.
+
+    Each lead: {email, first_name, last_name, company_name, custom_fields?}
+    custom_fields is a dict: {"segment": "PAYMENTS", "city": "Miami"}
+    """
     from gtm_mcp.tools.smartlead import smartlead_add_leads as _impl
-    return await _impl(api_key, campaign_id, leads)
+    return await _impl(campaign_id, leads, config=_config)
 
 
 @mcp.tool()
 async def smartlead_list_accounts() -> dict:
-    """List SmartLead email accounts."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+    """List ALL SmartLead email accounts (paginated — handles 2000+ accounts).
+
+    Returns every account with: id, from_email, from_name, warmup_status.
+    Fetches all pages automatically (100 per page).
+    """
     from gtm_mcp.tools.smartlead import smartlead_list_accounts as _impl
-    return await _impl(api_key)
+    return await _impl(config=_config)
 
 
 @mcp.tool()
-async def smartlead_sync_replies(campaign_id: int) -> dict:
-    """Sync replied leads from a SmartLead campaign."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+async def smartlead_sync_replies(
+    project: str, campaign_slug: str, campaign_id: int,
+) -> dict:
+    """Sync replied leads from a SmartLead campaign. Saves replies.json to workspace."""
     from gtm_mcp.tools.smartlead import smartlead_sync_replies as _impl
-    return await _impl(api_key, campaign_id)
+    return await _impl(project, campaign_slug, campaign_id,
+                       config=_config, workspace=_workspace)
 
 
 @mcp.tool()
 async def smartlead_send_reply(campaign_id: int, lead_id: int, body: str) -> dict:
     """Send a reply to a lead in SmartLead."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
     from gtm_mcp.tools.smartlead import smartlead_send_reply as _impl
-    return await _impl(api_key, campaign_id, lead_id, body)
+    return await _impl(campaign_id, lead_id, body, config=_config)
 
 
 @mcp.tool()
 async def smartlead_activate_campaign(campaign_id: int, confirm: str) -> dict:
-    """Activate a SmartLead campaign. Must pass confirm='I confirm'."""
-    api_key = _config.get("smartlead_api_key")
-    if not api_key:
-        return {"success": False, "error": "SmartLead API key not configured."}
+    """Activate a SmartLead campaign. confirm must be exactly 'I confirm'.
+
+    This starts REAL email sending — use with care.
+    """
     from gtm_mcp.tools.smartlead import smartlead_activate_campaign as _impl
-    return await _impl(api_key, campaign_id, confirm)
+    return await _impl(campaign_id, confirm, config=_config)
+
+
+@mcp.tool()
+async def smartlead_pause_campaign(campaign_id: int, confirm: str) -> dict:
+    """Pause an active SmartLead campaign. confirm must be exactly 'I confirm'.
+
+    Pauses all email sending. Use smartlead_activate_campaign to resume.
+    """
+    from gtm_mcp.tools.smartlead import smartlead_pause_campaign as _impl
+    return await _impl(campaign_id, confirm, config=_config)
+
+
+@mcp.tool()
+async def smartlead_send_test_email(
+    campaign_id: int, test_email: str, sequence_number: int = 1,
+) -> dict:
+    """Send a test email from a campaign to verify the sequence.
+
+    Requires at least one lead and one email account on the campaign.
+    Auto-resolves the sending account and lead for variable substitution.
+    """
+    from gtm_mcp.tools.smartlead import smartlead_send_test_email as _impl
+    return await _impl(campaign_id, test_email, sequence_number, config=_config)
+
+
+@mcp.tool()
+async def smartlead_get_campaign(campaign_id: int) -> dict:
+    """Get campaign details by ID — name, status, assigned accounts, sequences.
+
+    Use to validate an existing campaign before appending new leads.
+    """
+    from gtm_mcp.tools.smartlead import smartlead_get_campaign as _impl
+    return await _impl(campaign_id, config=_config)
+
+
+@mcp.tool()
+async def smartlead_export_leads(campaign_id: int) -> dict:
+    """Export all leads from a SmartLead campaign.
+
+    Returns every lead with email, name, company, domain.
+    Use for dedup when appending new contacts to an existing campaign.
+    """
+    from gtm_mcp.tools.smartlead import smartlead_export_leads as _impl
+    return await _impl(campaign_id, config=_config)
 
 
 # ─── GetSales Tools ───────────────────────────────────────────────────────────

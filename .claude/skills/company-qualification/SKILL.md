@@ -115,27 +115,79 @@ If initial accuracy is low:
 - More PRECISE based on mismatch patterns
 - Must generalize to ANY company in segment
 
+## Classification Prompt Generation
+
+The classification prompt is built dynamically from the project context. NEVER hardcode segment names, industry terms, or company names.
+
+**Structure** (5-8 exclusion rules + 3-4 inclusion signals):
+
+```
+YOU ARE CLASSIFYING COMPANIES FOR: {offer_description}
+
+TARGET SEGMENT: {icp_text}
+
+EXCLUSION RULES (if ANY match → NOT a target):
+1. DIRECT COMPETITOR: sells {our_product_type} (same product we sell)
+2. {exclusion from document, e.g. "iGaming operators — they're customers of our targets, not our targets"}
+3. {exclusion from document}
+4. COMPLETELY UNRELATED: no connection to {segment}
+5. FREELANCER/SOLO CONSULTANT: individual, not a company
+6. PLACEHOLDER/PARKED WEBSITE: no real business content
+7. SHUT DOWN/INACTIVE: no longer operating
+(add 1-3 more from document exclusion_list if available)
+
+INCLUSION SIGNALS (what makes a company a TARGET):
+1. Would BUY {our_product} (they're a CUSTOMER)
+2. {inclusion from segments, e.g. "operates payment infrastructure"}
+3. {inclusion from segments, e.g. "provides lending-as-a-service"}
+4. Growing company (funding, hiring, expanding)
+
+CLASSIFY from the WEBSITE TEXT (not Apollo labels).
+Return JSON: {"is_target": bool, "confidence": 0-100, "segment": "CAPS_LABEL", "reasoning": "1-2 sentences"}
+For targets: segment = one of {segment_labels}
+For non-targets: segment = what the company ACTUALLY IS (COMPETITOR, RESTAURANT, etc.)
+```
+
+**If document has exclusion_list**: Extract exclusion items and add as numbered rules after the 7 defaults. These take priority.
+
+**If no document**: Use the generic 7 exclusion rules above + 4 default inclusion signals from the offer_summary.
+
 ## 2-Pass Re-evaluation
 
-For borderline cases (confidence 0.4-0.7):
-- Re-classify with higher-quality model (gpt-4o instead of gpt-4o-mini)
-- Include extra context from Apollo enrichment data
-- If still borderline → mark for human review
+**Trigger**: After initial classification, for companies with confidence 40-70 (borderline).
 
-## Exploration (Optional Accuracy Boost)
+**Algorithm**:
+1. Filter companies where 40 <= confidence <= 70
+2. For each borderline company, re-classify with:
+   - FULL scraped text (not truncated)
+   - Apollo enrichment data if available (employee count, funding, keywords)
+   - The SAME classification prompt
+3. If re-classification changes verdict → update classification, note `reclassified: true`
+4. If still borderline → mark `needs_human_review: true`
 
-If initial target rate is low, run exploration:
-1. Pick top 5 confirmed targets
-2. Enrich each via Apollo (5 credits total)
-3. Extract common patterns: industry_tag_ids, keywords, SIC/NAICS codes
-4. Use patterns to generate BETTER Apollo filters
-5. Re-gather with improved filters → higher target rate
+**When to trigger**: After each classification pass. NOT for every single company — only borderline batch.
 
-**Common Labels Extraction from enriched targets:**
-- industry_tag_ids: most frequent across targets
-- keywords: most frequent (top 15 from keyword_tags)
-- industries: most frequent (top 10)
-- sic_codes: most frequent (top 5)
+## Exploration Enrichment Algorithm
+
+**Trigger**: Quality gate says `suggest_exploration: true` (targets exist but rate < 50%, or user requests it).
+
+**Algorithm** (costs 5 credits total):
+1. Pick top 5 confirmed targets by confidence (highest first). Must be `is_target: true` and `confidence >= 70`.
+2. Call `apollo_enrich_companies([domain1, domain2, ..., domain5])` — returns full Apollo data including `industry_tag_id`, `keywords`, `sic_codes`.
+3. Extract common patterns across the 5 enriched companies:
+   - `industry_tag_ids`: Count frequency. Take top 2-3 that appear in ≥2 of 5 companies.
+   - `keywords`: Aggregate all `keywords` arrays. Count frequency. Take top 15 that appear in ≥2 companies. Exclude generic terms (tech, company, solutions).
+   - `industries`: Most frequent industry name across 5.
+   - `sic_codes`: Top 3 most common (if available).
+4. Build improved filter set:
+   - NEW industry_tag_ids from enrichment (may differ from original LLM-picked ones)
+   - NEW keywords informed by actual target company labels
+   - Same locations and employee_ranges (unchanged)
+5. Create new FilterSnapshot with trigger `exploration_improved`, parent = current snapshot
+6. Present to user: "Exploration found these patterns: {industries}, {keywords}. Re-search with improved filters?"
+7. If user approves → start new round with improved filters
+
+**The enrichment data also auto-extends the taxonomy** — new industry_tag_ids discovered here get stored for future use.
 
 ## Concurrency
 
@@ -148,7 +200,17 @@ If initial target rate is low, run exploration:
 1. Call `scrape_website` tool for each company domain
 2. Use the scraped text (NOT Apollo industry label) for classification
 3. Max 5000 chars of cleaned text per company
-4. If scrape fails → classify with low confidence from Apollo data only
+
+**Scrape failure handling**:
+- `success` + text_length > 100 → classify from scraped text (normal)
+- `success` + text_length < 100 → classify with `confidence < 30`, mark `classified_from: "insufficient_text"`
+- `failed` with error `TIMEOUT` → do NOT retry (site is slow, skip)
+- `failed` with error `BLOCKED` or `RATE_LIMITED` → retry once with proxy if available
+- `failed` with error `DNS_ERROR` or `CONNECTION_ERROR` → skip (domain dead)
+- `failed` with error `SSL_ERROR` → already handled by scraper's HTTP fallback
+- Any failure → classify from Apollo data only (industry, employee_count, keywords), set `confidence < 30`, mark `classified_from: "apollo_data_only"`
+
+**Never skip classification entirely.** Every company gets a verdict — even if low confidence. Low-confidence companies show up as "needs review" in quality gate.
 
 ## Per-Company Tracking Fields
 

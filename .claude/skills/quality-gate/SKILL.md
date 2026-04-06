@@ -4,10 +4,31 @@ Define checkpoints that must PASS before pipeline advances. Prevents wasting cre
 
 ## When to Use
 
+- **Pre-flight**: Before pipeline starts (Checkpoint 0)
 - After gathering phase (Checkpoint 1)
 - After classification phase (Checkpoint 2)
 - After people extraction (Checkpoint 3)
 - When user asks "is this enough?" or "should I continue?"
+
+## Checkpoint 0: Pre-Flight Validation
+
+**Trigger**: Before ANY Apollo credits are spent. Called by `/launch` command.
+
+ALL of these must be true before pipeline starts:
+
+| Field | Check | If Missing |
+|-------|-------|------------|
+| offer_extracted | offer.yaml exists in project | ASK: "What's your website or what do you sell?" |
+| segments | non-empty list | ASK: "What type of companies should I search for?" |
+| geo | non-empty list | ASK: "Which locations should I target?" |
+| email_accounts | non-empty list of SmartLead account IDs | ASK: "Which email accounts to use?" |
+| sequence | GOD_SEQUENCE or user-provided steps | USE DEFAULT: GOD_SEQUENCE |
+| kpi | target_contacts + contacts_per_company set | USE DEFAULT: 100 contacts, 3/company |
+| cost_approved | user confirmed cost estimate | SHOW estimate, wait for "proceed" |
+
+**Result**: `PASS` (all resolved) or `BLOCK` (report which field is missing).
+
+**Rule**: Ask ONE missing field at a time. Never ask multiple questions in one response.
 
 ## Checkpoint 1: Post-Gather
 
@@ -86,6 +107,13 @@ Define checkpoints that must PASS before pipeline advances. Prevents wasting cre
 | MAX_TOTAL_CREDITS | 200 | Safety cap — pipeline stops if exceeded |
 | EFFECTIVE_PER_PAGE | 60 | Apollo returns ~60 unique per 100 requested |
 | COMPANIES_PER_ROUND | 400 | Stop adding Apollo requests when this many unique companies |
+| SCRAPE_CONCURRENCY | 100 | Max parallel website scrapes |
+| CLASSIFY_CONCURRENCY | 100 | Max parallel LLM classifications |
+| PEOPLE_CONCURRENCY | 20 | Max parallel people extraction calls |
+| LOW_CONFIDENCE_THRESHOLD | 40 | Below this = low confidence, classify from Apollo data |
+| BORDERLINE_CONFIDENCE | 40-70 | Triggers 2-pass re-evaluation with higher model |
+| HIGH_CONFIDENCE_THRESHOLD | 70 | Above this = confident classification |
+| MAX_REGEN_KEYWORDS_PER_CYCLE | 30-40 | Fresh keywords per regeneration angle |
 
 ## KPI Targets (User Can Override)
 
@@ -113,6 +141,50 @@ Define checkpoints that must PASS before pipeline advances. Prevents wasting cre
 
 **Never spend credits without user confirmation.**
 
+### Per-Service Cost Model
+
+| Service | Unit | Cost | Notes |
+|---------|------|------|-------|
+| **Apollo search** | 1 page (100 results) | 1 credit ($0.01) | Company search |
+| **Apollo people search** | per request | FREE | `mixed_people/api_search` — no credits |
+| **Apollo bulk_match** | 1 person enriched | 1 credit ($0.01) | Email verification |
+| **Apollo org enrich** | 1 company enriched | 1 credit ($0.01) | For exploration |
+| **Apollo probe** | 1 probe request | 1 credit ($0.01) | Preview phase |
+| **Apify proxy** | per GB transferred | ~$8/GB | Residential proxy for scraping |
+| **LLM classification** | per company classified | ~$0.003 | ~$0.07 per 300 companies |
+| **LLM reply classification** | per reply (Tier 3 only) | ~$0.001 | Tier 1+2 are FREE |
+
+### Cost Breakdown Format (show at every gate)
+
+```
+PIPELINE COST ESTIMATE:
+  Apollo search:     ~15 credits ($0.15) — 15 keyword/industry streams × 1 page
+  Apollo people:     ~100 credits ($1.00) — 100 contacts × 1 credit each
+  Apollo probes:     6 credits ($0.06) — preview phase
+  Apify scraping:    ~$0.02 — ~400 pages × ~5KB each
+  LLM classify:      ~$0.07 — ~300 companies × $0.003
+  ─────────────────────────────
+  TOTAL:             ~121 credits ($1.21) + ~$0.09 LLM/proxy
+```
+
+### Running Cost Tracker
+
+Track cumulative costs in the run file's `totals`:
+```json
+{
+  "total_credits_search": 24,
+  "total_credits_people": 91,
+  "total_credits_probe": 6,
+  "total_credits": 121,
+  "total_usd_apollo": 1.21,
+  "total_usd_llm": 0.07,
+  "total_usd_proxy": 0.02,
+  "total_usd": 1.30
+}
+```
+
+After each credit-spending action, show: "Spent so far: {N} credits (${X}). Remaining budget: {200-N} credits."
+
 ## Pipeline KPI Loop
 
 The autonomous pipeline checks KPIs continuously:
@@ -135,27 +207,42 @@ REPEAT until:
 
 ## Exhaustion Detection
 
-- 10 consecutive empty Apollo pages = keyword/industry exhausted
-- When funded stream (Level 0) exhausts → drop funding filter, continue Level 1
+**What counts as "empty"**: A page is empty when `new_unique == 0` (all returned companies already seen in dedup set). NOT `raw_returned == 0` — Apollo may return duplicates.
+
+**Per-stream exhaustion**: Track consecutive empty pages PER keyword/industry stream independently:
+- 10 consecutive pages with `new_unique == 0` → this stream is exhausted
+- LOW_YIELD_THRESHOLD: if page 1 returns `new_unique < 10` → stop this keyword immediately (bad yield)
+- MAX_PAGES_PER_KEYWORD = 5 → stop even if still yielding
+
+**Funding exhaustion cascade**:
+- Level 0 (funded): all streams with funding filter → 10 empty = drop funding
+- Level 1 (unfunded): same keywords/industries WITHOUT funding → often hits sparse pagination (Apollo returns 0 despite large total_entries). If 3 consecutive empty → move on
+- Level 2+: keyword regeneration with new angles
 - Geo/size filters NEVER dropped (always mandatory)
-- After all initial keywords exhausted → regenerate keywords (up to 5 cycles)
 
-## Keyword Regeneration Angles (10 total, when keywords exhaust)
+**After dropping funding**: Continue the SAME keyword on unfunded stream. Don't stop the keyword just because its funded variant exhausted.
 
-Each cycle uses a DIFFERENT angle to discover untapped company pools:
+**After ALL initial keywords exhausted**: Regenerate keywords (up to 5 cycles max, per pipeline-spec section 6). Pipeline-spec says "up to 3" in one place and quality-gate says 5 — use **5** (the implementation value) as the max.
 
-1. **PRODUCT/PLATFORM** names — specific tools, software, platforms in the space
-2. **TECHNOLOGY STACK** — protocols, standards, certifications (PCI DSS, ISO 20022, SWIFT)
-3. **USE CASES** — what problems solved ("reduce fraud", "automate payroll")
-4. **BUYER SEARCH LANGUAGE** — procurement, RFP, vendor selection terms
-5. **ADJACENT NICHES** — sub-categories, crossover markets
-6. **INDUSTRY JARGON** — insider terms, acronyms, regulations
-7. **COMPETITOR/ALTERNATIVES** — comparison terms ("alternative to Deel")
-8. **JOB POSTING keywords** — skills, team names, roles companies hire for
-9. **INVESTOR/FUNDING keywords** — pitch terms, market maps, fund themes
-10. **CONFERENCE/EVENT keywords** — industry events, associations, trade shows
+## Keyword Regeneration
 
-Generate 10-15 new keywords per angle. All MUST be different from all previous keywords.
+**Max cycles**: 5 regeneration cycles before giving up (status: "insufficient")
+
+**Angle rotation** — use angles in this order (most productive first, based on real pipeline results):
+1. **PRODUCT/PLATFORM** names — specific tools, platforms in the space (highest yield)
+2. **USE CASES** — what problems solved, buyer pain points
+3. **TECHNOLOGY STACK** — protocols, standards, certifications
+4. **ADJACENT NICHES** — sub-categories, crossover markets
+5. **COMPETITOR/ALTERNATIVES** — comparison terms ("alternative to Deel")
+
+If 5 cycles not enough (rare), the remaining 5 angles are available but pipeline should stop with "insufficient":
+6. BUYER SEARCH LANGUAGE, 7. INDUSTRY JARGON, 8. JOB POSTING keywords, 9. INVESTOR/FUNDING keywords, 10. CONFERENCE/EVENT keywords
+
+**Per cycle**: Generate 30-40 completely NEW keywords per angle.
+
+**Dedup algorithm**: Before generating, collect ALL keywords from ALL parent filter snapshots (traverse parent_id chain). Pass this list to the LLM as "ALREADY USED — do not repeat any of these." The LLM generates fresh keywords informed by which target companies were found (their Apollo keywords/industries).
+
+**Informed by found targets**: After each round, look at which companies ARE targets. Extract their Apollo `keywords` and `industry` fields. These inform the regeneration — "companies like {target} have keywords {kw1, kw2}" → generate similar but unexplored keywords.
 
 ## Per-Keyword / Per-Industry Performance Tracking
 

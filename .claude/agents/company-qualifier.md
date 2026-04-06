@@ -32,3 +32,15 @@ For each company: domain, is_target, segment (CAPS_SNAKE_CASE), confidence (0.0-
 - Target rate > 15% for PASS
 - Scrape success > 60% for PASS
 - High confidence (>0.7) in > 50% of targets for PASS
+
+## Silence Protocol
+
+When invoked as a background worker (via Task tool from manager-leadgen during round loop):
+- Produce no conversational output
+- Write all results via `save_data` tool calls
+- Include execution metadata (_execution block with started_at, completed_at, status)
+- Signal completion by writing results to the specified output path
+
+When invoked directly (via /qualify command):
+- Normal conversational output (silence protocol does NOT apply)
+- Report results to user with segment distribution and quality gate verdict

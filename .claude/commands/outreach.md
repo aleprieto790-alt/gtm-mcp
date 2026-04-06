@@ -5,6 +5,7 @@ Generate email and/or LinkedIn sequences and push to campaign platforms.
 ## Arguments
 - `--channel email|linkedin|both`: Channel selection (default: email)
 - `--project <name>`: Project to use
+- `--campaign <id_or_slug>`: Push to existing campaign (skip campaign creation + sequence)
 - `--sequence-file <path>`: Use sequence from file instead of generating
 
 ## Email Path
@@ -34,13 +35,25 @@ Ask: "Which email accounts?"
 - Present: "14 accounts matched. Confirm?"
 
 ### 5. Push to SmartLead
+
+**If `--campaign` NOT provided (new campaign):**
 - Call `smartlead_create_campaign` (DRAFT)
 - Call `smartlead_set_sequence` with generated steps
-- Call `smartlead_add_leads` with contacts:
-  - Verified emails only
-  - Dedup against blacklist
-  - Include custom fields: company_name, segment, city
-- Send test email to user's email
+- Call `smartlead_add_leads` with contacts
+- Call `smartlead_send_test_email(campaign_id, user_email)`
+- If Google Sheets configured: `sheets_export_contacts(project, campaign_slug)`
+
+**If `--campaign` provided (append to existing):**
+- Call `find_campaign(campaign_ref)` → resolve project + campaign data
+- Call `smartlead_get_campaign(campaign_id)` → validate exists, not STOPPED
+- SKIP campaign creation + sequence (already set)
+- Export existing leads: `smartlead_export_leads(campaign_id)` → dedup emails
+- Call `smartlead_add_leads` with deduped contacts only
+
+**Contacts for both paths:**
+- Verified emails only
+- Dedup against blacklist
+- Include custom fields: company_name, segment, city
 
 ### 6. Present Results
 ALL 4 items:

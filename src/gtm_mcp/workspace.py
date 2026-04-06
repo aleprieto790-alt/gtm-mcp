@@ -57,6 +57,107 @@ class WorkspaceManager:
             return []
         return [d.name for d in self.projects_dir.iterdir() if d.is_dir()]
 
+    # --- Campaign lookup ---
+
+    def find_campaign(self, campaign_ref: str) -> dict | None:
+        """Find a campaign by SmartLead ID or slug across all projects.
+
+        Returns {project, slug, data} or None if not found.
+        """
+        for project in self.list_projects():
+            d = self._project_dir(project)
+            campaigns_dir = d / "campaigns"
+            if not campaigns_dir.exists():
+                continue
+            for campaign_dir in campaigns_dir.iterdir():
+                if not campaign_dir.is_dir():
+                    continue
+                yaml_path = campaign_dir / "campaign.yaml"
+                if not yaml_path.exists():
+                    continue
+                try:
+                    data = self._read_file(yaml_path)
+                except Exception:
+                    continue
+                # Match by slug or by campaign_id (as string or int)
+                if (campaign_dir.name == campaign_ref
+                        or str(data.get("campaign_id", "")) == str(campaign_ref)):
+                    return {"project": project, "slug": campaign_dir.name, "data": data}
+        return None
+
+    # --- Cost reporting ---
+
+    def get_project_costs(self, project: str) -> dict:
+        """Aggregate costs across all runs in a project, grouped by campaign."""
+        d = self._project_dir(project)
+        runs_dir = d / "runs"
+        if not runs_dir.exists():
+            return {"runs": [], "campaigns": {}, "totals": {
+                "total_credits": 0, "total_credits_search": 0,
+                "total_credits_people": 0, "total_usd": 0,
+                "total_contacts": 0, "total_companies": 0,
+            }}
+
+        runs = []
+        campaign_costs: dict[str, dict] = {}
+        grand = {"total_credits": 0, "total_credits_search": 0,
+                 "total_credits_people": 0, "total_usd": 0,
+                 "total_contacts": 0, "total_companies": 0}
+
+        for run_file in sorted(runs_dir.glob("run-*.json")):
+            try:
+                run = self._read_file(run_file)
+            except Exception:
+                continue
+            totals = run.get("totals", {})
+            run_id = run.get("run_id", run_file.stem)
+            campaign_slug = run.get("campaign_slug", "unlinked")
+            campaign_id = run.get("campaign_id")
+
+            entry = {
+                "run_id": run_id,
+                "campaign_slug": campaign_slug,
+                "campaign_id": campaign_id,
+                "status": run.get("status", "unknown"),
+                "credits_search": totals.get("total_credits_search", 0),
+                "credits_people": totals.get("total_credits_people", 0),
+                "credits_total": totals.get("total_credits", 0),
+                "usd": totals.get("total_usd", 0),
+                "companies": totals.get("unique_companies", 0),
+                "targets": totals.get("targets", 0),
+                "contacts": totals.get("contacts_extracted", 0),
+            }
+            runs.append(entry)
+
+            # Aggregate by campaign
+            if campaign_slug not in campaign_costs:
+                campaign_costs[campaign_slug] = {
+                    "campaign_id": campaign_id,
+                    "runs": [],
+                    "credits_search": 0, "credits_people": 0,
+                    "credits_total": 0, "usd": 0,
+                    "companies": 0, "contacts": 0,
+                }
+            c = campaign_costs[campaign_slug]
+            c["runs"].append(run_id)
+            c["credits_search"] += entry["credits_search"]
+            c["credits_people"] += entry["credits_people"]
+            c["credits_total"] += entry["credits_total"]
+            c["usd"] += entry["usd"]
+            c["companies"] += entry["companies"]
+            c["contacts"] += entry["contacts"]
+
+            # Grand totals
+            grand["total_credits"] += entry["credits_total"]
+            grand["total_credits_search"] += entry["credits_search"]
+            grand["total_credits_people"] += entry["credits_people"]
+            grand["total_usd"] += entry["usd"]
+            grand["total_contacts"] += entry["contacts"]
+            grand["total_companies"] += entry["companies"]
+
+        grand["total_usd"] = round(grand["total_usd"], 2)
+        return {"runs": runs, "campaigns": campaign_costs, "totals": grand}
+
     # --- Blacklist ---
 
     def blacklist_check(self, domain: str) -> bool:
