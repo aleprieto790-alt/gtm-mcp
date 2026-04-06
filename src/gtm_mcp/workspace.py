@@ -29,6 +29,7 @@ class WorkspaceManager:
             return self._save_versioned(d, name, data)
 
         path = d / name
+        path.parent.mkdir(parents=True, exist_ok=True)  # create nested dirs (campaigns/slug/)
         ext = path.suffix.lower()
 
         if mode == "merge" and path.exists():
@@ -224,6 +225,8 @@ class WorkspaceManager:
         for k, v in override.items():
             if k in result and isinstance(result[k], dict) and isinstance(v, dict):
                 result[k] = self._deep_merge(result[k], v)
+            elif k in result and isinstance(result[k], list) and isinstance(v, list):
+                result[k] = deepcopy(result[k]) + deepcopy(v)
             else:
                 result[k] = deepcopy(v)
         return result

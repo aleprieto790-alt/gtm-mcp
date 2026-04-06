@@ -6,6 +6,7 @@ Known bug: create sometimes returns "Plan expired!" — retry once with 2s delay
 """
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone as tz
 from typing import Any
 
@@ -355,7 +356,7 @@ async def smartlead_create_campaign(
         setup_warnings.append("email_accounts")
 
     # Step 5: save locally
-    slug = name.lower().replace(" ", "-").replace("—", "-")
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     campaign_data = {
         "campaign_id": campaign_id, "name": name, "slug": slug,
         "project": project, "segment": segment,
