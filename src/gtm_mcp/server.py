@@ -1,4 +1,4 @@
-"""GTM-MCP Server — 39 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 41 thin tools, zero LLM calls. stdio transport via FastMCP."""
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -180,17 +180,43 @@ async def apollo_search_people(
     domain: str,
     person_seniorities: list[str] | None = None,
     per_page: int = 25,
+    enrich: bool = False,
+    max_enrich: int = 3,
 ) -> dict:
-    """Search Apollo for people at a company. FREE — no credits.
+    """Search Apollo for people at a company. FREE — no credits (search only).
 
     Returns candidates with person IDs for enrichment. Filters has_email=true.
     Default seniorities: owner, founder, c_suite, vp, head, director.
+
+    If enrich=True: auto-enriches top max_enrich candidates in one call.
+    Saves a round trip vs calling apollo_enrich_people separately.
+    Credits: 1 per verified email (only charged when enrich=True).
     """
     api_key = _config.get("apollo_api_key")
     if not api_key:
         return {"success": False, "error": "Apollo API key not configured."}
     from gtm_mcp.tools.apollo import apollo_search_people as _impl
-    return await _impl(api_key, domain, person_seniorities, per_page)
+    return await _impl(api_key, domain, person_seniorities, per_page, enrich, max_enrich)
+
+
+@mcp.tool()
+async def apollo_search_people_batch(
+    domains: list[str],
+    person_seniorities: list[str] | None = None,
+    per_page: int = 10,
+    enrich: bool = False,
+    max_enrich: int = 3,
+) -> dict:
+    """Search people across many domains in parallel. FREE — no credits for search.
+
+    20 concurrent. Pass all target domains at once — one tool call instead of N.
+    If enrich=True, also enriches top candidates per domain (1 credit each).
+    """
+    api_key = _config.get("apollo_api_key")
+    if not api_key:
+        return {"success": False, "error": "Apollo API key not configured."}
+    from gtm_mcp.tools.apollo import apollo_search_people_batch as _impl
+    return await _impl(api_key, domains, person_seniorities, per_page, enrich, max_enrich)
 
 
 @mcp.tool()
@@ -432,8 +458,37 @@ async def getsales_list_profiles() -> dict:
 
 
 @mcp.tool()
+async def getsales_build_flow(
+    name: str, connection_note: str, messages: list[str],
+    flow_type: str = "standard",
+) -> dict:
+    """Build and create a GetSales LinkedIn flow from messages — no manual node construction.
+
+    Builds the full "God Level" node tree automatically:
+      Trigger → connection_request → accept/reject branches → messages → withdraw
+
+    flow_type: standard, networking, product, volume, event (controls timing).
+    connection_note: text for the LinkedIn connection request.
+    messages: list of message texts (2-3 messages recommended).
+    """
+    api_key = _config.get("getsales_api_key")
+    team_id = _config.get("getsales_team_id")
+    if not api_key or not team_id:
+        return {"success": False, "error": "GetSales not configured."}
+    from gtm_mcp.tools.getsales import build_node_tree, FLOW_TYPE_TIMING, getsales_create_flow as _impl
+    timing = FLOW_TYPE_TIMING.get(flow_type, FLOW_TYPE_TIMING["standard"])
+    nodes = build_node_tree(connection_note, messages, timing)
+    result = await _impl(api_key, team_id, name, nodes)
+    if result.get("success"):
+        result["flow_type"] = flow_type
+        result["node_count"] = len(nodes)
+        result["messages_count"] = len(messages)
+    return result
+
+
+@mcp.tool()
 async def getsales_create_flow(name: str, nodes: list[dict]) -> dict:
-    """Create a GetSales LinkedIn outreach flow."""
+    """Create a GetSales LinkedIn outreach flow from raw nodes. Prefer getsales_build_flow instead."""
     api_key = _config.get("getsales_api_key")
     team_id = _config.get("getsales_team_id")
     if not api_key or not team_id:
@@ -462,6 +517,20 @@ async def getsales_activate_flow(flow_id: int, confirm: str) -> dict:
         return {"success": False, "error": "GetSales not configured."}
     from gtm_mcp.tools.getsales import getsales_activate_flow as _impl
     return await _impl(api_key, team_id, flow_id, confirm)
+
+
+# ─── MCP Prompts ─────────────────────────────────────────────────────────────
+
+from gtm_mcp.prompts import (
+    lead_generation, classify_companies, classify_replies,
+    generate_email_sequence, analyze_offer,
+)
+
+mcp.prompt()(lead_generation)
+mcp.prompt()(classify_companies)
+mcp.prompt()(classify_replies)
+mcp.prompt()(generate_email_sequence)
+mcp.prompt()(analyze_offer)
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────

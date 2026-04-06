@@ -166,11 +166,16 @@ async def apollo_search_people(
     domain: str,
     person_seniorities: list[str] | None = None,
     per_page: int = 25,
+    enrich: bool = False,
+    max_enrich: int = 3,
 ) -> dict:
     """Search Apollo for people at a company. FREE — no credits.
 
     Returns candidates with person IDs for enrichment via apollo_enrich_people.
     Filters has_email=true only. Default seniorities: owner→founder→c_suite→vp→head→director.
+
+    If enrich=True: auto-enriches top max_enrich candidates (1 credit per verified email).
+    Combines search + enrich in one call — saves a round trip.
     """
     seniorities = person_seniorities or ["owner", "founder", "c_suite", "vp", "head", "director"]
 
@@ -201,7 +206,7 @@ async def apollo_search_people(
             "organization_name": (p.get("organization") or {}).get("name", ""),
         })
 
-    return {
+    result = {
         "success": True,
         "people": people,
         "total": data.get("pagination", {}).get("total_entries", 0),
@@ -209,34 +214,92 @@ async def apollo_search_people(
         "credits_used": 0,
     }
 
+    if enrich and people:
+        top_ids = [p["id"] for p in people[:max_enrich] if p.get("id")]
+        if top_ids:
+            enriched = await apollo_enrich_people(api_key, top_ids)
+            result["enriched"] = enriched.get("matches", [])
+            result["credits_used"] = enriched.get("credits_used", 0)
+            result["new_industry_tags_discovered"] = enriched.get("new_industry_tags_discovered")
+
+    return result
+
+
+async def apollo_search_people_batch(
+    api_key: str,
+    domains: list[str],
+    person_seniorities: list[str] | None = None,
+    per_page: int = 10,
+    enrich: bool = False,
+    max_enrich: int = 3,
+    max_concurrent: int = 20,
+) -> dict:
+    """Search people across many domains in parallel. FREE — no credits for search.
+
+    20 concurrent by default. If enrich=True, also enriches top candidates (1 credit each).
+    Returns all results in one call — much faster than per-domain calls.
+    """
+    import asyncio
+    sem = asyncio.Semaphore(max_concurrent)
+    results: list[dict] = []
+
+    async def process(domain: str):
+        async with sem:
+            r = await apollo_search_people(api_key, domain, person_seniorities, per_page, enrich, max_enrich)
+            results.append(r)
+
+    await asyncio.gather(*[process(d) for d in domains], return_exceptions=True)
+
+    total_people = sum(len(r.get("people", [])) for r in results if r.get("success"))
+    total_credits = sum(r.get("credits_used", 0) for r in results)
+    successful = [r for r in results if r.get("success")]
+
+    return {
+        "success": True,
+        "data": {
+            "domains_searched": len(domains),
+            "domains_with_people": len([r for r in successful if r.get("people")]),
+            "total_candidates": total_people,
+            "credits_used": total_credits,
+            "results": results,
+        },
+    }
+
 
 async def apollo_enrich_people(api_key: str, person_ids: list[str]) -> dict:
     """Enrich people by Apollo person IDs via bulk_match. 1 credit per verified email.
 
-    Returns ONLY verified emails. Also extracts organization data (industry_tag_id)
-    which can be used to auto-extend the industry taxonomy.
+    Returns ONLY verified emails. Auto-chunks into batches of 10 (Apollo limit).
+    Also extracts organization data (industry_tag_id) for taxonomy extension.
     """
     if not person_ids:
         return {"success": True, "matches": [], "credits_used": 0}
 
-    details = [{"id": pid} for pid in person_ids]
-    data = await _api_call(api_key, "POST", "/people/bulk_match", {
-        "details": details, "reveal_personal_emails": True,
-    })
-    if not data:
+    # Auto-chunk: Apollo bulk_match fails on >10 IDs
+    all_matches_raw = []
+    for i in range(0, len(person_ids), 10):
+        chunk = person_ids[i:i + 10]
+        details = [{"id": pid} for pid in chunk]
+        data = await _api_call(api_key, "POST", "/people/bulk_match", {
+            "details": details, "reveal_personal_emails": True,
+        })
+        if data:
+            all_matches_raw.extend(data.get("matches", []))
+
+    if not all_matches_raw:
         return {"success": False, "error": "Apollo bulk_match failed"}
 
     matches = []
     credits = 0
     new_tag_ids = {}
 
-    for match in data.get("matches", []):
+    for match in all_matches_raw:
         if not match:
             continue
-        credits += 1
 
         if match.get("email_status") != "verified":
             continue
+        credits += 1
 
         org = match.get("organization") or {}
         if org.get("industry_tag_id") and org.get("industry"):
@@ -287,11 +350,13 @@ async def apollo_enrich_companies(api_key: str, domains: list[str]) -> dict:
     all_companies = []
     total_credits = 0
     new_tag_ids = {}
+    failed_domains = []
 
     for i in range(0, len(domains), 10):
         batch = domains[i:i + 10]
         data = await _api_call(api_key, "POST", "/organizations/bulk_enrich", {"domains": batch})
         if not data:
+            failed_domains.extend(batch)
             continue
 
         for org in data.get("organizations") or []:
@@ -326,12 +391,16 @@ async def apollo_enrich_companies(api_key: str, domains: list[str]) -> dict:
     if new_tag_ids:
         _extend_industry_tags(new_tag_ids)
 
-    return {
+    result = {
         "success": True,
         "companies": all_companies,
         "credits_used": total_credits,
         "new_industry_tags_discovered": new_tag_ids if new_tag_ids else None,
     }
+    if failed_domains:
+        result["failed_domains"] = failed_domains
+        result["warning"] = f"{len(failed_domains)} domains failed enrichment"
+    return result
 
 
 def apollo_get_taxonomy() -> dict:
