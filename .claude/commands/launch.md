@@ -339,6 +339,21 @@ Strategy Document:
 
 ```
 save_data(project, "project.yaml", {..., offer_approved: true}, mode="merge")
+
+# Save the approval document for audit trail
+save_data(project, "pipeline-config.yaml", {
+  project: project_slug, mode: mode,
+  offer: {primary_offer, segments, target_roles},
+  filters: {keywords_count, industry_tag_ids, locations, employee_ranges},
+  probe: {breakdown, credits_used},
+  cost_estimate: {total_credits, usd},
+  kpi: {target_people, max_credits},
+  email_accounts: selected_account_ids,
+  sequence: "from_document" | "GOD_SEQUENCE",
+  blacklist: {domains_count},
+  status: "approved", approved_at: "{now}"
+})
+
 save_data(project, "state.yaml", {..., phase_states: {cost_gate: "completed"}})
 ```
 
@@ -488,8 +503,22 @@ If credits_used >= max_credits → STOP with warning
 If not enough targets → next keyword batch (Round 2)
 ```
 
-**Save the complete round with timestamps:**
+**CRITICAL: Save EVERYTHING to the run file.** Test Run #1 failed because contacts and campaign data weren't saved.
+
 ```
+# 1. Save contacts to BOTH contacts.json AND run file
+save_data(project, "contacts.json", all_contacts, mode="write")
+save_data(project, "runs/{run_id}.json", {
+  contacts: all_contacts,
+  totals: {
+    ...existing_totals,
+    contacts_extracted: len(all_contacts),
+    kpi_met: len(all_contacts) >= kpi.target_people,
+    total_credits: search_credits + people_credits
+  }
+}, mode="merge")
+
+# 2. Save round with timestamps
 save_data(project, "runs/{run_id}.json", {
   rounds: [{
     id: "round-001",
@@ -505,6 +534,12 @@ save_data(project, "runs/{run_id}.json", {
     people_phase: {targets_processed, contacts_extracted, credits_used, duration_seconds}
   }]
 }, mode="merge")
+
+# 3. Compute keyword leaderboard
+For each keyword in requests[]:
+  quality_score = target_rate * log(unique_companies + 1) / max(credits, 1)
+save_data(project, "runs/{run_id}.json", {keyword_leaderboard: sorted_by_quality}, mode="merge")
+```
 ```
 
 **After all mini-batches complete**, compute totals:
@@ -657,18 +692,44 @@ smartlead_set_sequence(project, campaign.slug, campaign.campaign_id, sequence_st
 smartlead_add_leads(campaign_id, [{email, first_name, last_name, company_name, custom_fields: {segment, city}}])
 ```
 
-### Update tracking
+### Update tracking — ALL THREE files must be updated
+
+**CRITICAL: Test Run #1 failed here — agent didn't update run file or campaign.yaml after push.**
 
 ```
-save_data(project, f"campaigns/{slug}/campaign.yaml", {..., run_ids: [run_id], total_leads_pushed: N})
-save_data(project, "project.yaml", {..., campaigns: [..., {slug, campaign_id, segment, country, status}]}, mode="merge")
-save_data(project, "runs/run-001.json", {..., campaign: {campaign_id, leads_pushed: N, pushed_at: now}}, mode="merge")
+# 1. Update campaign.yaml with run link + lead count
+campaign_yaml = load_data(project, f"campaigns/{slug}/campaign.yaml").data
+campaign_yaml["run_ids"] = [run_id]
+campaign_yaml["total_leads_pushed"] = len(leads)
+save_data(project, f"campaigns/{slug}/campaign.yaml", campaign_yaml)
+
+# 2. Update project.yaml campaigns index
+save_data(project, "project.yaml", {
+  campaigns: [{slug: slug, campaign_id: campaign_id, segment: segment, country: country, status: "DRAFT"}]
+}, mode="merge")
+
+# 3. Update run file with campaign data
+save_data(project, f"runs/{run_id}.json", {
+  campaign_id: campaign_id,
+  campaign_slug: slug,
+  campaign: {
+    campaign_id: campaign_id,
+    leads_pushed: len(leads),
+    pushed_at: "{ISO timestamp}"
+  }
+}, mode="merge")
 ```
+
+**Verify all three were saved before presenting Checkpoint 2.**
 
 ### Test email
 
+**CRITICAL: Use email from config, NOT from the document.**
 ```
-user_email from get_config() → user_email field. If not set, ask.
+config = get_config()
+user_email = config.values.user_email    # from GTM_MCP_USER_EMAIL in .env
+# If not set → ask user: "What email should I send the test to?"
+# NEVER use an email from the outreach document for test emails.
 smartlead_send_test_email(campaign_id, user_email)
 ```
 
