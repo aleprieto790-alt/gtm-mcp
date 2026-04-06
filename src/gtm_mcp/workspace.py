@@ -1,6 +1,7 @@
 """Workspace manager — file-based project storage in ~/.gtm-mcp/projects/."""
 import json
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -159,33 +160,102 @@ class WorkspaceManager:
         grand["total_usd"] = round(grand["total_usd"], 2)
         return {"runs": runs, "campaigns": campaign_costs, "totals": grand}
 
-    # --- Blacklist ---
+    # --- Blacklist (temporal, with structured metadata) ---
 
-    def blacklist_check(self, domain: str) -> bool:
+    def blacklist_check(self, domain: str, max_age_days: int | None = None) -> bool:
+        """Check if domain is blacklisted. If max_age_days set, only considers
+        entries with last_contact_date within that window."""
         bl = self._load_blacklist()
-        return domain.lower().strip() in bl
+        d = domain.lower().strip()
+        if d not in bl:
+            return False
+        if max_age_days is None:
+            return True
+        entry = bl[d]
+        if isinstance(entry, dict) and entry.get("last_contact_date"):
+            try:
+                contact_date = datetime.fromisoformat(entry["last_contact_date"])
+                age = (datetime.now(timezone.utc) - contact_date).days
+                return age <= max_age_days
+            except (ValueError, TypeError):
+                pass
+        return True  # no date info → treat as blacklisted
 
-    def blacklist_add(self, domains: list):
+    def blacklist_add(self, domains: list, source: str = "", campaign_name: str = "",
+                      last_contact_date: str = ""):
+        """Add domains to blacklist with optional temporal metadata."""
         bl = self._load_blacklist()
-        bl.update(d.lower().strip() for d in domains)
+        now = datetime.now(timezone.utc).isoformat()
+        for d in domains:
+            key = d.lower().strip()
+            if not key:
+                continue
+            entry = bl.get(key, {})
+            if not isinstance(entry, dict):
+                entry = {"blacklisted_at": now}
+            if source:
+                entry["source"] = source
+            if campaign_name:
+                entry["campaign_name"] = campaign_name
+            if last_contact_date:
+                entry["last_contact_date"] = last_contact_date
+            entry.setdefault("blacklisted_at", now)
+            entry["domain"] = key
+            bl[key] = entry
         self._save_blacklist(bl)
 
-    def blacklist_import(self, path: str) -> int:
+    def blacklist_import(self, path: str, source: str = "") -> int:
         p = Path(path)
         if not p.exists():
             return 0
         domains = [line.strip() for line in p.read_text().splitlines() if line.strip()]
-        self.blacklist_add(domains)
+        self.blacklist_add(domains, source=source or p.name)
         return len(domains)
 
-    def _load_blacklist(self) -> set:
+    def _load_blacklist(self) -> dict:
+        """Load blacklist as dict keyed by domain.
+        Backward-compatible: migrates old list format to structured dict."""
         if not self.blacklist_file.exists():
-            return set()
+            return {}
         data = json.loads(self.blacklist_file.read_text())
-        return set(data) if isinstance(data, list) else set()
+        # Migrate from old flat list format
+        if isinstance(data, list):
+            now = datetime.now(timezone.utc).isoformat()
+            return {d: {"domain": d, "blacklisted_at": now} for d in data}
+        if isinstance(data, dict):
+            return data
+        return {}
 
-    def _save_blacklist(self, bl: set):
-        self.blacklist_file.write_text(json.dumps(sorted(bl), indent=2))
+    def _save_blacklist(self, bl: dict):
+        self.blacklist_file.write_text(json.dumps(bl, indent=2, ensure_ascii=False, default=str))
+
+    # --- Company Name Normalization ---
+
+    @staticmethod
+    def normalize_company_name(name: str) -> str:
+        """Normalize company name by stripping legal suffixes.
+
+        Rules (from pipeline-state skill):
+        1. Strip comma-prefixed legal suffixes: , Inc., , LLC, , Ltd., , Corp., etc.
+        2. Strip trailing punctuation (. or ,)
+        3. Trim whitespace
+        4. Keep original casing (don't force title case)
+        """
+        import re
+        if not name:
+            return name
+        # Strip comma-prefixed legal suffixes (case-insensitive)
+        suffixes = (
+            r",?\s*Inc\.?", r",?\s*LLC\.?", r",?\s*Ltd\.?", r",?\s*Corp\.?",
+            r",?\s*GmbH", r",?\s*S\.A\.?", r",?\s*B\.V\.?", r",?\s*Pty\.?\s*Ltd\.?",
+            r",?\s*PLC\.?", r",?\s*AG", r",?\s*S\.r\.l\.?", r",?\s*S\.L\.?",
+            r",?\s*Co\.?", r",?\s*Limited",
+        )
+        pattern = r"(?:" + "|".join(suffixes) + r")\s*$"
+        result = re.sub(pattern, "", name, flags=re.IGNORECASE).strip()
+        # Strip trailing punctuation
+        result = result.rstrip(".,").strip()
+        return result
 
     # --- Versioned saves ---
 

@@ -222,13 +222,13 @@ REPEAT until:
 
 **After dropping funding**: Continue the SAME keyword on unfunded stream. Don't stop the keyword just because its funded variant exhausted.
 
-**After ALL initial keywords exhausted**: Regenerate keywords (up to 5 cycles max, per pipeline-spec section 6). Pipeline-spec says "up to 3" in one place and quality-gate says 5 — use **5** (the implementation value) as the max.
+**After ALL initial keywords exhausted**: Regenerate keywords (up to 5 cycles max). Use the angle rotation above — one angle per cycle, 30-40 fresh keywords each.
 
 ## Keyword Regeneration
 
-**Max cycles**: 5 regeneration cycles before giving up (status: "insufficient")
+**Max cycles**: 5 regeneration cycles before giving up (status: "insufficient").
 
-**Angle rotation** — use angles in this order (most productive first, based on real pipeline results):
+**Angle rotation** — use in this order (most productive first, from real pipeline results):
 1. **PRODUCT/PLATFORM** names — specific tools, platforms in the space (highest yield)
 2. **USE CASES** — what problems solved, buyer pain points
 3. **TECHNOLOGY STACK** — protocols, standards, certifications

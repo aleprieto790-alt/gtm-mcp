@@ -44,7 +44,7 @@ Before saving state.yaml, verify:
 2. `current_phase` is one of the 7 valid phase names
 3. All 7 phase_states keys exist
 4. Each phase_state value is one of: pending, in_progress, completed, failed, skipped
-5. `status` is one of: pending_approval, running, paused, completed, insufficient, failed
+5. `status` is one of: awaiting_approval, approved, running, paused, completed, insufficient, failed
 6. `last_updated` is set to current timestamp
 7. `mode` is one of: fresh, new_campaign, append
 8. `active_run_id` is set and matches `run_id`

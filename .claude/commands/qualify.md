@@ -2,6 +2,8 @@
 
 Classify companies as target/not-target using via negativa rules.
 
+**Read before starting:** **company-qualification** skill (via negativa rules), **quality-gate** skill (checkpoint 2 metrics).
+
 ## Arguments
 - `--file <path>`: CSV file with domains
 - `--project <name>`: Use companies from pipeline

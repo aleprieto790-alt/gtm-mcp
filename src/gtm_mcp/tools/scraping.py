@@ -129,6 +129,12 @@ def _is_binary(content: bytes) -> bool:
     return non_printable / len(sample) > 0.15
 
 
+def _error(error: str, error_code: str, retryable: bool, status_code: int | None = None) -> dict:
+    """Build structured error response with error_code and retryable flag."""
+    return {"success": False, "error": error, "error_code": error_code,
+            "retryable": retryable, "status_code": status_code}
+
+
 async def _fetch(url: str, proxy: Optional[str], timeout: float) -> dict:
     """Single fetch attempt with proxy or direct."""
     try:
@@ -142,38 +148,38 @@ async def _fetch(url: str, proxy: Optional[str], timeout: float) -> dict:
             sc = resp.status_code
 
             if sc == 403:
-                return {"success": False, "error": "BLOCKED: Access denied (403)", "status_code": 403}
+                return _error("BLOCKED: Access denied (403)", "BLOCKED", True, 403)
             if sc == 404:
-                return {"success": False, "error": "NOT_FOUND: Page does not exist (404)", "status_code": 404}
+                return _error("NOT_FOUND: Page does not exist (404)", "NOT_FOUND", False, 404)
             if sc == 429:
-                return {"success": False, "error": "RATE_LIMITED: Too many requests (429)", "status_code": 429}
+                return _error("RATE_LIMITED: Too many requests (429)", "RATE_LIMITED", True, 429)
             if sc >= 500:
-                return {"success": False, "error": f"SERVER_ERROR: HTTP {sc}", "status_code": sc}
+                return _error(f"SERVER_ERROR: HTTP {sc}", "SERVER_ERROR", True, sc)
             if sc >= 400:
-                return {"success": False, "error": f"ERROR: HTTP {sc}", "status_code": sc}
+                return _error(f"ERROR: HTTP {sc}", "HTTP_ERROR", False, sc)
 
             if _is_binary(resp.content):
-                return {"success": False, "error": "BINARY: Not a text page", "status_code": sc}
+                return _error("BINARY: Not a text page", "BINARY", False, sc)
 
             text = _clean_html(resp.text)
             if not text or len(text) < 50:
-                return {"success": False, "error": "EMPTY: No text content", "status_code": sc}
+                return _error("EMPTY: No text content", "EMPTY", False, sc)
 
             return {"success": True, "text": text, "status_code": sc, "text_length": len(text)}
 
     except httpx.TimeoutException:
-        return {"success": False, "error": f"TIMEOUT: No response within {timeout}s", "status_code": None}
+        return _error(f"TIMEOUT: No response within {timeout}s", "TIMEOUT", False, None)
     except httpx.ConnectError as e:
         err = str(e).lower()
         if "ssl" in err or "certificate" in err:
-            return {"success": False, "error": "SSL_ERROR: Certificate verification failed", "status_code": None}
+            return _error("SSL_ERROR: Certificate verification failed", "SSL_ERROR", False, None)
         if "nodename" in err or "getaddrinfo" in err or "name or service not known" in err:
-            return {"success": False, "error": "DNS_ERROR: Domain not found", "status_code": None}
-        return {"success": False, "error": "CONNECTION_ERROR: Could not connect", "status_code": None}
+            return _error("DNS_ERROR: Domain not found", "DNS_ERROR", False, None)
+        return _error("CONNECTION_ERROR: Could not connect", "CONNECTION_ERROR", True, None)
     except httpx.TooManyRedirects:
-        return {"success": False, "error": "REDIRECT_ERROR: Too many redirects", "status_code": None}
+        return _error("REDIRECT_ERROR: Too many redirects", "REDIRECT_ERROR", False, None)
     except Exception as e:
-        return {"success": False, "error": f"ERROR: {str(e)[:100]}", "status_code": None}
+        return _error(f"ERROR: {str(e)[:100]}", "UNKNOWN", False, None)
 
 
 async def scrape_website(

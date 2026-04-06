@@ -2,6 +2,8 @@
 
 Sync replies from SmartLead campaigns, classify them, and present a triage report.
 
+**Read before starting:** **reply-classification** skill (3-tier funnel, classification rules, draft response generation).
+
 ## Arguments
 - `--campaign <name>`: Specific campaign (default: all active campaigns)
 - `--project <name>`: All campaigns for a project

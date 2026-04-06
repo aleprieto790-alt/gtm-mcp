@@ -447,20 +447,25 @@ async def smartlead_set_sequence(
 # ---------------------------------------------------------------------------
 
 async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=None) -> dict:
-    """Add leads to a campaign. Each lead: {email, first_name, last_name, company_name, custom_fields?}"""
+    """Add leads to a campaign. Each lead: {email, first_name, last_name, company_name, custom_fields?}
+
+    Company names are auto-normalized (strips Inc/LLC/Ltd/Corp/GmbH).
+    """
     config = config or _default_config()
     api_key = config.get("smartlead_api_key")
     if not api_key:
         return {"success": False, "error": "smartlead_api_key not configured"}
 
-    # Format leads for SmartLead
+    from gtm_mcp.workspace import WorkspaceManager
+
+    # Format leads for SmartLead with normalized company names
     lead_list = []
     for lead in leads:
         entry = {
             "email": lead["email"],
             "first_name": lead.get("first_name", ""),
             "last_name": lead.get("last_name", ""),
-            "company_name": lead.get("company_name", ""),
+            "company_name": WorkspaceManager.normalize_company_name(lead.get("company_name", "")),
         }
         if lead.get("custom_fields"):
             entry["custom_fields"] = lead["custom_fields"]
@@ -498,6 +503,59 @@ async def smartlead_sync_replies(
 
     return {"success": True, "data": {"campaign_id": campaign_id,
             "replied_count": len(replied), "leads": replied}}
+
+
+# ---------------------------------------------------------------------------
+# Get lead message history — full thread for Tier 2 reply classification
+# ---------------------------------------------------------------------------
+
+async def smartlead_get_lead_messages(
+    campaign_id: int, lead_id: int, *, config=None,
+) -> dict:
+    """Fetch full message thread for a lead — sent emails + received replies.
+
+    Used by Tier 2 reply classification to extract the LATEST reply text
+    and re-check regex patterns on the full conversation thread.
+    Returns messages in chronological order.
+    """
+    config = config or _default_config()
+    api_key = config.get("smartlead_api_key")
+    if not api_key:
+        return {"success": False, "error": "smartlead_api_key not configured"}
+
+    data = await _api_call("GET", f"/campaigns/{campaign_id}/leads/{lead_id}/message-history",
+                           api_key)
+    if data is None:
+        return {"success": False, "error": f"Failed to fetch messages for lead {lead_id}"}
+
+    messages = []
+    history = data if isinstance(data, list) else data.get("data", data.get("history", []))
+    if isinstance(history, list):
+        for msg in history:
+            messages.append({
+                "type": msg.get("type", ""),        # "SENT" or "RECEIVED"
+                "subject": msg.get("subject", ""),
+                "body": msg.get("body", msg.get("email_body", "")),
+                "time": msg.get("time", msg.get("created_at", "")),
+            })
+
+    # Extract latest reply (last RECEIVED message)
+    latest_reply = None
+    for msg in reversed(messages):
+        if msg.get("type", "").upper() in ("RECEIVED", "REPLY"):
+            latest_reply = msg.get("body", "")
+            break
+
+    return {
+        "success": True,
+        "data": {
+            "campaign_id": campaign_id,
+            "lead_id": lead_id,
+            "messages": messages,
+            "message_count": len(messages),
+            "latest_reply": latest_reply,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

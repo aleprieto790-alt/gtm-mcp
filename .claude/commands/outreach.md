@@ -2,6 +2,8 @@
 
 Generate email and/or LinkedIn sequences and push to campaign platforms.
 
+**Read before starting:** **email-sequence** skill (12-rule GOD_SEQUENCE), **linkedin-sequence** skill (flow types and timing).
+
 ## Arguments
 - `--channel email|linkedin|both`: Channel selection (default: email)
 - `--project <name>`: Project to use
@@ -81,7 +83,7 @@ Same as email path
 - Separate from email contacts
 
 ### 3. Generate Flow
-**Skill**: linkedin-sequence
+Read the **linkedin-sequence** skill for flow types and timing presets.
 
 - Select flow type based on context
 - Generate messages + timing

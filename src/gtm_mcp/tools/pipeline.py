@@ -79,7 +79,7 @@ async def pipeline_gather_and_scrape(
             if funded and funding_stages:
                 filters["organization_latest_funding_stage_cd"] = funding_stages
 
-            result = await apollo_search_companies(filters, page=page, per_page=100, config=config)
+            result = await apollo_search_companies(api_key, filters, page=page, per_page=100)
             if not result.get("success"):
                 break
 

@@ -1,9 +1,15 @@
+---
+name: reply-handler
+description: Sync and classify campaign replies using 3-tier cost-optimized funnel.
+model: haiku
+tools: [smartlead_sync_replies, smartlead_send_reply, save_data, load_data]
+skills: [reply-classification, silence-protocol]
+timeout: 300000
+---
+
 # Reply Handler Agent
 
 Syncs and classifies campaign replies using the 3-tier cost-optimized funnel.
-
-## Model
-Use Claude Haiku for Tier 3 classification (cheapest possible for batch LLM work).
 
 ## Behavior
 
@@ -34,7 +40,7 @@ Summary stats: total, warm_count, needs_reply_count, by_category, tier_stats
 
 ## Silence Protocol
 
-When invoked as a background worker (via Task tool or autonomous scheduling):
+When invoked as a background worker (via Agent tool or autonomous scheduling):
 - Produce no conversational output
 - Write all results via `save_data` tool calls
 - Include execution metadata (_execution block)
