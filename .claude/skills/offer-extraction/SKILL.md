@@ -66,7 +66,9 @@ Extract ALL of the following into a structured JSON. Skip fields you can't deter
   
   "apollo_filters": {
     "combined_keywords": ["all segment keywords merged, 60-80 total"],
-    "locations": ["United States", "United Kingdom"],
+    "locations": ["Germany", "Netherlands", "Cyprus", "Israel"],
+    "excluded_locations": ["United States", "United Kingdom", "sanctioned countries"],
+    "geo_source": "website_footer",
     "employee_range": "20,500",
     "industries": ["financial services"],
     "funding_stages": ["series_a", "series_b", "series_c", "series_d"]
@@ -114,6 +116,37 @@ Extract ALL of the following into a structured JSON. Skip fields you can't deter
 ```
 
 ## Extraction Rules
+
+### Geography — CRITICAL, #1 source of wasted credits
+
+**Search the ENTIRE scraped text for geo signals. Check ALL of these:**
+- Footer/legal: "Available in", "Serving clients in", "Offices in"
+- Restrictions: "Excl.", "Excluding", "Not available in", "Restricted in", "Sanctioned"
+- Compliance: "Licensed in", "Regulated by", "GDPR only", "US-only"
+- About page: HQ location, team locations, market coverage statements
+
+**Extract BOTH inclusion AND exclusion:**
+- `locations[]` = where they target clients (search HERE)
+- `excluded_locations[]` = where they CANNOT serve (do NOT search here)
+- `geo_source` = where you found this info ("website_footer", "legal_page", "about_page", "none_found")
+
+**Examples:**
+- "Global coverage across Europe, Asia and LatAm *Excl. sanctioned countries, UK and US*"
+  → locations: ["Germany", "France", "Netherlands", ...EU + Asia + LatAm]
+  → excluded_locations: ["United States", "United Kingdom", "Russia", "Iran", "North Korea"]
+  → geo_source: "website_footer"
+
+- "Serving US and Canadian markets"
+  → locations: ["United States", "Canada"]
+  → excluded_locations: []
+  → geo_source: "about_page"
+
+- No geo mentioned anywhere
+  → locations: []
+  → excluded_locations: []
+  → geo_source: "none_found"
+
+**NEVER put excluded countries in the locations array. This wastes 100% of credits on those geos.**
 
 ### Segments
 - Use CAPS_SNAKE_CASE labels: PAYMENTS, LENDING, BAAS, REGTECH, WEALTHTECH, CRYPTO

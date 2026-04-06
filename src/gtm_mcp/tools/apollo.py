@@ -453,20 +453,37 @@ def apollo_estimate_cost(
     target_count: int = 100,
     contacts_per_company: int = 3,
     target_rate: float = 0.35,
+    num_keywords: int = 0,
+    num_industries: int = 0,
+    has_funding_filter: bool = True,
+    probe_credits: int = 6,
 ) -> dict:
-    """Estimate Apollo credits needed. No API call."""
-    target_companies = target_count / contacts_per_company
-    companies_from_apollo = target_companies / target_rate
-    pages = int(companies_from_apollo / 60) + 1
-    search_credits = pages
+    """Estimate Apollo credits needed. No API call.
+
+    The streaming pipeline fires 1 request per keyword + 1 per industry tag.
+    With funding filter, each stream has funded + unfunded variants (2x).
+    Most keywords exhaust in 1 page; high-yield ones page 2-3x.
+    """
+    # Search credits: each keyword/industry = 1 request minimum
+    streams = num_keywords + num_industries
+    if has_funding_filter:
+        streams *= 2  # funded + unfunded variants
+    avg_pages_per_stream = 1.3  # empirical: most exhaust page 1, some go to 2-3
+    search_credits = max(int(streams * avg_pages_per_stream), 1) + probe_credits
+
+    # If no keyword info provided, fall back to page-based estimate
+    if num_keywords == 0 and num_industries == 0:
+        target_companies = target_count / contacts_per_company
+        companies_from_apollo = target_companies / target_rate
+        search_credits = int(companies_from_apollo / 60) + 1 + probe_credits
+
     people_credits = target_count
-    exploration_credits = 5
-    total = search_credits + people_credits + exploration_credits
+    total = search_credits + people_credits
     return {
         "success": True,
         "search_credits": search_credits,
         "people_credits": people_credits,
-        "exploration_credits": exploration_credits,
+        "probe_credits": probe_credits,
         "total_credits": total,
         "total_usd": round(total * 0.01, 2),
         "estimate": f"~{total} credits (${round(total * 0.01, 2)})",

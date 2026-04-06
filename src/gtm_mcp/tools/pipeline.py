@@ -28,6 +28,7 @@ async def pipeline_gather_and_scrape(
     max_companies: int = 400,
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
+    keyword_start_pages: dict[str, int] | None = None,
     *,
     project: str,
     run_id: str,
@@ -75,9 +76,12 @@ async def pipeline_gather_and_scrape(
 
     # --- Phase 1: Apollo gather (all parallel, feeds scrape queue) ---
 
+    _start_pages = keyword_start_pages or {}
+
     async def search_one(filter_type: str, filter_value: str, funded: bool = False):
         nonlocal req_counter
-        for page in range(1, max_pages_per_stream + 1):
+        start = _start_pages.get(filter_value, 1)
+        for page in range(start, start + max_pages_per_stream):
             if len(seen_domains) >= max_companies:
                 break
 
@@ -112,15 +116,23 @@ async def pipeline_gather_and_scrape(
                 companies[domain] = {
                     "domain": domain,
                     "name": c.get("name", ""),
-                    "apollo_id": c.get("id", ""),
+                    "apollo_id": c.get("apollo_id", "") or c.get("id", ""),
                     "apollo_data": {
                         "industry": c.get("industry", ""),
                         "industry_tag_id": c.get("industry_tag_id", ""),
                         "employee_count": c.get("employee_count"),
+                        "employee_range": c.get("employee_range", ""),
                         "country": c.get("country", ""),
                         "city": c.get("city", ""),
+                        "state": c.get("state", ""),
                         "founded_year": c.get("founded_year"),
                         "linkedin_url": c.get("linkedin_url", ""),
+                        "short_description": c.get("short_description", ""),
+                        "keywords": c.get("keywords", []),
+                        "funding_stage": c.get("funding_stage", ""),
+                        "funding_amount": c.get("funding_amount"),
+                        "revenue": c.get("revenue", ""),
+                        "phone": c.get("phone", ""),
                     },
                     "discovery": {
                         "found_by": f"{filter_type}:{filter_value}",
@@ -338,10 +350,19 @@ async def pipeline_compute_leaderboard(
                 "unique_companies": 0,
                 "targets": 0,
                 "credits_used": 0,
+                "last_page": 0,
+                "exhausted": False,
             }
         s = keyword_stats[key]
         s["credits_used"] += req.get("result", {}).get("credits_used", 1)
         s["unique_companies"] += req.get("result", {}).get("new_unique", 0)
+        page = req.get("page", 1)
+        if page > s["last_page"]:
+            s["last_page"] = page
+        # Mark exhausted if page returned <100 results (no more pages to fetch)
+        raw = req.get("result", {}).get("raw_returned", 0)
+        if raw < 100:
+            s["exhausted"] = True
 
     # Count targets per keyword using company.discovery.found_by
     for domain, comp in companies.items():
@@ -364,6 +385,7 @@ async def pipeline_compute_leaderboard(
             **s,
             "target_rate": round(target_rate, 3),
             "quality_score": round(quality_score, 4),
+            "next_page": s["last_page"] + 1 if not s["exhausted"] else None,
         })
 
     leaderboard.sort(key=lambda x: -x["quality_score"])
@@ -523,6 +545,14 @@ async def pipeline_save_contacts(
 
     run_data["contacts"] = contacts
     kpi_target = run_data.get("kpi", {}).get("target_people", 100)
+
+    # Mark companies that had people extracted (for Phase 0 reuse in future runs)
+    enriched_domains = {c.get("company_domain") for c in contacts if c.get("company_domain")}
+    companies = run_data.get("companies", {})
+    for domain in enriched_domains:
+        if domain in companies:
+            companies[domain]["people_extracted"] = True
+
     run_data["totals"] = {
         **run_data.get("totals", {}),
         "contacts_extracted": len(contacts),
@@ -540,6 +570,201 @@ async def pipeline_save_contacts(
             "kpi_met": len(contacts) >= kpi_target,
             "kpi_target": kpi_target,
             "total_credits": search_credits + people_credits,
+        },
+    }
+
+
+async def pipeline_people_to_push(
+    project: str,
+    run_id: str,
+    campaign_name: str,
+    sending_account_ids: list[int],
+    country: str,
+    segment: str,
+    sequence_steps: list[dict],
+    test_email: str = "",
+    max_people_per_company: int = 3,
+    person_seniorities: list[str] | None = None,
+    create_sheet: bool = True,
+    mode: str = "create",
+    existing_campaign_id: int | None = None,
+    *,
+    config=None,
+    workspace=None,
+) -> dict:
+    """Atomic post-classification → SmartLead ready. ONE call, ZERO LLM.
+
+    After classification is done (targets in run file), this tool does EVERYTHING:
+    1. Load target domains from run file
+    2. apollo_search_people_batch — search all targets (FREE)
+    3. apollo_enrich_people — bulk enrich (1 credit per verified email)
+    4. Save contacts to contacts.json + run file + update totals
+    5. Export to Google Sheet (optional)
+    6. Push to SmartLead — create campaign OR append to existing
+    7. Update campaign.yaml + run file with campaign data
+
+    mode: "create" → new campaign via campaign_push
+          "append" → add leads to existing_campaign_id via smartlead_add_leads
+
+    Replaces 6+ separate tool calls. Eliminates all agent decisions post-classification.
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+
+    # 1. Load targets from run file
+    run_path = f"runs/{run_id}.json"
+    run_data = workspace.load(project, run_path)
+    if not run_data:
+        return {"success": False, "error": f"Run file {run_path} not found"}
+
+    companies = run_data.get("companies", {})
+    target_domains = [d for d, c in companies.items()
+                      if c.get("classification", {}).get("is_target")]
+
+    if not target_domains:
+        return {"success": False, "error": "No target companies found in run file"}
+
+    logger.info("pipeline_people_to_push: %d targets from %d companies", len(target_domains), len(companies))
+
+    # 2. Search people (FREE — no credits)
+    from gtm_mcp.tools.apollo import apollo_search_people_batch, apollo_enrich_people
+
+    api_key = config.get("apollo_api_key")
+    if not api_key:
+        return {"success": False, "error": "apollo_api_key not configured"}
+
+    seniorities = person_seniorities or ["c_suite", "vp", "head", "director", "manager"]
+    search_result = await apollo_search_people_batch(
+        api_key, target_domains, person_seniorities=seniorities, per_page=10,
+    )
+    if not search_result.get("success"):
+        return {"success": False, "error": f"People search failed: {search_result.get('error')}", "step": "search"}
+
+    # 3. Collect top N person IDs per company, then enrich
+    all_person_ids = []
+    for entry in search_result.get("results", []):
+        people = entry.get("people", [])
+        top_n = [p.get("id") for p in people[:max_people_per_company] if p.get("id")]
+        all_person_ids.extend(top_n)
+
+    if not all_person_ids:
+        return {"success": False, "error": "No people found across target companies", "step": "search",
+                "targets_searched": len(target_domains)}
+
+    enrich_result = await apollo_enrich_people(api_key, all_person_ids)
+    if not enrich_result.get("success"):
+        return {"success": False, "error": f"Enrichment failed: {enrich_result.get('error')}", "step": "enrich"}
+
+    # Build contacts list
+    contacts = []
+    for person in enrich_result.get("people", []):
+        if not person.get("email"):
+            continue
+        contacts.append({
+            "email": person["email"],
+            "first_name": person.get("first_name", ""),
+            "last_name": person.get("last_name", ""),
+            "name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+            "title": person.get("title", ""),
+            "seniority": person.get("seniority", ""),
+            "linkedin_url": person.get("linkedin_url", ""),
+            "phone": person.get("phone", ""),
+            "company_domain": person.get("company_domain", ""),
+            "company_name_normalized": person.get("company_name", ""),
+            "segment": companies.get(person.get("company_domain", ""), {}).get(
+                "classification", {}).get("segment", segment),
+        })
+
+    people_credits = len(contacts)
+    search_credits = run_data.get("totals", {}).get("total_credits_search", 0)
+    logger.info("pipeline_people_to_push: %d contacts enriched (%d credits)", len(contacts), people_credits)
+
+    # 4. Save contacts (atomic — both files + totals + kpi_met + people_extracted)
+    await pipeline_save_contacts(project, run_id, contacts, search_credits, people_credits,
+                                 workspace=workspace)
+
+    # 5. Google Sheet export (optional)
+    sheet_url = ""
+    if create_sheet and contacts:
+        from gtm_mcp.tools.sheets import sheets_export_contacts
+        sheet_result = await sheets_export_contacts(project, config=config, workspace=workspace)
+        if sheet_result.get("success"):
+            sheet_url = sheet_result["data"].get("sheet_url", "")
+
+    # 6. Save leads file for push
+    import json
+    leads = []
+    for c in contacts:
+        leads.append({
+            "email": c["email"],
+            "first_name": c.get("first_name", ""),
+            "last_name": c.get("last_name", ""),
+            "company_name": c.get("company_name_normalized", ""),
+            "linkedin_url": c.get("linkedin_url", ""),
+            "phone": c.get("phone", ""),
+        })
+    workspace.save(project, "leads_for_push.json", leads)
+
+    # 7. Campaign push
+    campaign_id = None
+    campaign_slug = None
+    leads_uploaded = 0
+
+    if mode == "create":
+        from gtm_mcp.tools.campaign_push import campaign_push
+        push_result = await campaign_push(
+            project, campaign_name, sending_account_ids, country, segment,
+            sequence_steps, "leads_for_push.json", test_email, run_id=run_id,
+            config=config, workspace=workspace,
+        )
+        if push_result.get("success"):
+            campaign_id = push_result["data"]["campaign_id"]
+            campaign_slug = push_result["data"]["campaign_slug"]
+            leads_uploaded = push_result["data"]["leads_uploaded"]
+    elif mode == "append" and existing_campaign_id:
+        from gtm_mcp.tools.smartlead import smartlead_add_leads
+        add_result = await smartlead_add_leads(existing_campaign_id, leads, config=config)
+        if add_result.get("success"):
+            campaign_id = existing_campaign_id
+            leads_uploaded = len(leads)
+            # Update campaign.yaml
+            import re
+            slug = re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
+            campaign_slug = slug
+            existing_camp = workspace.load(project, f"campaigns/{slug}/campaign.yaml")
+            if existing_camp:
+                existing_camp["total_leads_pushed"] = existing_camp.get("total_leads_pushed", 0) + len(leads)
+                existing_run_ids = existing_camp.get("run_ids", [])
+                if run_id not in existing_run_ids:
+                    existing_run_ids.append(run_id)
+                existing_camp["run_ids"] = existing_run_ids
+                workspace.save(project, f"campaigns/{slug}/campaign.yaml", existing_camp)
+
+        # Update run file with campaign link
+        run_data = workspace.load(project, run_path) or {}
+        run_data["campaign_id"] = campaign_id
+        run_data["campaign_slug"] = campaign_slug
+        from datetime import datetime, timezone as tz
+        run_data["campaign"] = {
+            "campaign_id": campaign_id,
+            "leads_pushed": leads_uploaded,
+            "pushed_at": datetime.now(tz.utc).isoformat(),
+        }
+        workspace.save(project, run_path, run_data)
+
+    return {
+        "success": True,
+        "data": {
+            "targets": len(target_domains),
+            "contacts": len(contacts),
+            "people_credits": people_credits,
+            "total_credits": search_credits + people_credits,
+            "kpi_met": len(contacts) >= run_data.get("kpi", {}).get("target_people", 100),
+            "campaign_id": campaign_id,
+            "campaign_slug": campaign_slug,
+            "leads_uploaded": leads_uploaded,
+            "sheet_url": sheet_url,
+            "mode": mode,
         },
     }
 

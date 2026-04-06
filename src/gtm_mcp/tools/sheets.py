@@ -159,8 +159,8 @@ async def sheets_export_contacts(
     if not contacts:
         return {"success": False, "error": "No contacts match the filter"}
 
-    # Join with run file companies to get classification reasoning
-    company_reasoning: dict[str, dict] = {}
+    # Join with run file companies to get classification + apollo_data
+    company_data: dict[str, dict] = {}  # domain → {apollo_data, classification}
     run_ids = (campaign_data or {}).get("run_ids", [])
     if not run_ids:
         # Scan for latest run file
@@ -176,11 +176,23 @@ async def sheets_export_contacts(
         if run_data and isinstance(run_data.get("companies"), dict):
             for domain, comp in run_data["companies"].items():
                 cls = comp.get("classification", {})
-                if cls.get("is_target"):
-                    company_reasoning[domain] = {
-                        "confidence": cls.get("confidence", ""),
-                        "reasoning": cls.get("reasoning", ""),
-                    }
+                apollo = comp.get("apollo_data", {})
+                company_data[domain] = {
+                    "confidence": cls.get("confidence", ""),
+                    "reasoning": cls.get("reasoning", ""),
+                    "industry": apollo.get("industry", ""),
+                    "employee_count": apollo.get("employee_count", ""),
+                    "employee_range": apollo.get("employee_range", ""),
+                    "country": apollo.get("country", ""),
+                    "city": apollo.get("city", ""),
+                    "state": apollo.get("state", ""),
+                    "revenue": apollo.get("revenue", ""),
+                    "short_description": apollo.get("short_description", ""),
+                    "funding_stage": apollo.get("funding_stage", ""),
+                    "founded_year": apollo.get("founded_year", ""),
+                    "keywords": ", ".join(apollo.get("keywords", [])[:5]) if apollo.get("keywords") else "",
+                    "phone": apollo.get("phone", ""),
+                }
 
     # Create sheet if none provided — auto-share with user_email from config
     if not sheet_id:
@@ -201,11 +213,22 @@ async def sheets_export_contacts(
     if not sheets_svc:
         return {"success": False, "error": "Google credentials not configured"}
 
-    # Build rows from contacts, enriched with classification reasoning
+    # Build rows from contacts, enriched with apollo_data + classification
     rows = []
     for c in contacts:
         domain = c.get("company_domain", "")
-        cr = company_reasoning.get(domain, {})
+        cd = company_data.get(domain, {})
+
+        # Company location: city, state, country
+        loc_parts = [cd.get("city", ""), cd.get("state", ""), cd.get("country", "")]
+        company_location = ", ".join(p for p in loc_parts if p)
+
+        # Employees: prefer employee_range ("11-50") over raw count
+        employees = cd.get("employee_range", "") or str(cd.get("employee_count", "") or "")
+
+        # Revenue for market size
+        revenue = cd.get("revenue", "")
+
         rows.append([
             c.get("name", "").split(" ")[0] if c.get("name") else c.get("first_name", ""),
             c.get("name", "").split(" ", 1)[1] if c.get("name") and " " in c.get("name", "") else c.get("last_name", ""),
@@ -213,28 +236,28 @@ async def sheets_export_contacts(
             domain,
             c.get("linkedin_url", ""),
             c.get("company_name_normalized", c.get("company_name", "")),
-            "",  # Company Location
+            company_location,  # Company Location — from Apollo
             c.get("segment", ""),
-            "",  # Employees
+            employees,  # Employees — from Apollo
             c.get("email", ""),
-            "",  # Industry
-            "",  # Status
-            "",  # Sample Status
-            "",  # Sample Comment
-            "",  # Sample Responsible
+            cd.get("industry", ""),  # Industry — from Apollo
+            "",  # Status (CRM operational)
+            "",  # Sample Status (CRM operational)
+            "",  # Sample Comment (CRM operational)
+            "",  # Sample Responsible (CRM operational)
             "Apollo",  # Lead Source
-            "",  # Updates
-            "",  # Sample link
-            "",  # Market size
+            "",  # Updates (CRM operational)
+            "",  # Sample link (CRM operational)
+            str(revenue) if revenue else "",  # Market size — from Apollo revenue
             "Email",  # Channel
             campaign_slug,  # campaign
-            "",  # text
+            cd.get("short_description", ""),  # text — Apollo short description
             "",  # time
             "",  # created time
             str((campaign_data or {}).get("campaign_id", "")),  # campaign_id
-            "",  # category
-            str(cr.get("confidence", "")),  # target_confidence
-            cr.get("reasoning", ""),  # target_reasoning
+            cd.get("funding_stage", ""),  # category — funding stage
+            str(cd.get("confidence", "")),  # target_confidence
+            cd.get("reasoning", ""),  # target_reasoning
         ])
 
     try:

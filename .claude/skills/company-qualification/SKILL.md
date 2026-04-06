@@ -60,9 +60,9 @@ For EACH company, return:
 ```json
 {
   "is_target": true,
-  "confidence": 0.85,
+  "confidence": 85,
   "segment": "PAYMENTS",
-  "reasoning": "Stripe dashboard integration platform. Provides payment analytics for merchants. Would be a customer for our payment infrastructure API."
+  "reasoning": "Their website describes PayFlex as an 'enterprise payment orchestration platform' offering APIs for multi-acquirer routing and smart payment retries. The product page mentions PCI DSS Level 1 compliance and integration with 40+ PSPs. This is B2B payment infrastructure — they sell to merchants and marketplaces processing high-volume transactions. Classic buyer for outbound sales pipeline generation."
 }
 ```
 
@@ -76,6 +76,28 @@ For EACH company, return:
 - 70-89: Good match, some ambiguity
 - 40-69: Borderline, needs human review (trigger 2-pass re-evaluation)
 - 0-39: Likely non-match or insufficient data
+
+### Reasoning Quality — MUST cite website evidence
+
+**The reasoning field is a PARAGRAPH (3-5 sentences), not a label restatement.**
+
+It MUST include:
+1. **What the company does** — cite specific phrases from the scraped website text
+2. **Product/service evidence** — quote their product names, features, pricing model
+3. **Why target/non-target** — explain the buyer logic (or exclusion reason)
+4. **Confidence justification** — if borderline, say what's uncertain
+
+**GOOD reasoning** (specific, evidence-grounded):
+> "Their website describes PayFlex as an 'enterprise payment orchestration platform' offering APIs for multi-acquirer routing. The developer docs page and enterprise pricing tiers confirm B2B infrastructure. They serve merchants processing 10K+ transactions/day — exactly the buyer profile for outbound pipeline services."
+
+**BAD reasoning** (generic label — NEVER do this):
+> "B2B payment processing company operating in PAYMENTS segment."
+
+**BAD reasoning** (hallucinated — NEVER do this):
+> "Company is focused on scaling sales through qualified appointments."
+
+If the scraped text is thin (just a homepage tagline), cite exactly what you have:
+> "Homepage says 'Next-gen banking APIs' with no detail page. Likely BaaS infrastructure based on tagline + Apollo industry tag. Low confidence — website is too sparse for definitive classification."
 
 ## Dynamic Prompt Generation
 

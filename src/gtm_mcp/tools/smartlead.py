@@ -8,6 +8,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone as tz
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,27 +34,81 @@ COUNTRY_TIMEZONES: dict[str, str] = {
 }
 
 
+def _get_log_path() -> Path:
+    """Get SmartLead API log file path — persists across sessions."""
+    log_dir = Path.home() / ".gtm-mcp"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "smartlead_api.log"
+
+
+def _log_to_file(direction: str, method: str, endpoint: str, detail: str = ""):
+    """Append SmartLead API call to persistent log file."""
+    from datetime import datetime, timezone as tz
+    ts = datetime.now(tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {direction} {method} {endpoint}{detail}\n"
+    try:
+        with open(_get_log_path(), "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 async def _api_call(method: str, endpoint: str, api_key: str, *,
                     json_data: dict | None = None, params: dict | None = None) -> Any:
     p = dict(params or {})
     p["api_key"] = api_key
     url = f"{BASE_URL}{endpoint}"
+
+    # Log request (truncate large payloads for readability)
+    payload_summary = ""
+    if json_data:
+        ids = json_data.get("email_account_ids")
+        if ids and len(ids) > 5:
+            payload_summary = f" payload={{email_account_ids: [{len(ids)} ids, first={ids[:3]}...]}}"
+        else:
+            payload_summary = f" payload={str(json_data)[:200]}"
+    logger.info("SmartLead → %s %s%s", method, endpoint, payload_summary)
+    _log_to_file("→", method, endpoint, payload_summary)
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             if method == "POST":
                 resp = await client.post(url, json=json_data, params=p)
             elif method == "PATCH":
                 resp = await client.patch(url, json=json_data, params=p)
+            elif method == "DELETE":
+                resp = await client.request("DELETE", url, json=json_data, params=p)
             else:
                 resp = await client.get(url, params=p)
+
+            # Log response
+            body = resp.text[:300] if resp.text else ""
+            if resp.status_code >= 400:
+                logger.error("SmartLead ← %s %s → HTTP %s: %s", method, endpoint, resp.status_code, body)
+                _log_to_file("←", method, endpoint, f" HTTP {resp.status_code}: {body[:200]}")
+            else:
+                try:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        logger.info("SmartLead ← %s %s → %s (%d items)", method, endpoint, resp.status_code, len(data))
+                        _log_to_file("←", method, endpoint, f" {resp.status_code} ({len(data)} items)")
+                    else:
+                        logger.info("SmartLead ← %s %s → %s", method, endpoint, resp.status_code)
+                        _log_to_file("←", method, endpoint, f" {resp.status_code}")
+                except Exception:
+                    logger.info("SmartLead ← %s %s → %s", method, endpoint, resp.status_code)
+                    _log_to_file("←", method, endpoint, f" {resp.status_code}")
+
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPStatusError as exc:
         logger.error("SmartLead %s %s → %s: %s", method, endpoint,
                       exc.response.status_code, exc.response.text[:300])
+        _log_to_file("ERROR", method, endpoint, f" HTTP {exc.response.status_code}: {exc.response.text[:200]}")
         return None
     except Exception as exc:
         logger.error("SmartLead %s %s failed: %s", method, endpoint, exc)
+        _log_to_file("ERROR", method, endpoint, f" {str(exc)[:200]}")
         return None
 
 
@@ -342,17 +397,65 @@ async def smartlead_create_campaign(
         logger.error("Campaign %s: settings setup failed", campaign_id)
 
     # Step 4: assign email accounts
+    # SmartLead may auto-assign ALL connected accounts on campaign creation.
+    # Pattern from magnum-opus: POST adds, DELETE /email-accounts/{id} removes.
+    # Flow: POST desired → GET current → DELETE unwanted → verify.
+    desired_ids = set(sending_account_ids)
+    accounts_ok = False
+
+    # 4a: POST desired accounts (same as magnum-opus/mcp set_campaign_email_accounts)
     step4 = await _api_call("POST", f"/campaigns/{campaign_id}/email-accounts", api_key,
                     json_data={"email_account_ids": sending_account_ids})
     if step4 is None:
-        logger.error("Campaign %s: email account assignment failed", campaign_id)
+        logger.error("Campaign %s: email account POST failed", campaign_id)
+
+    # 4b: Verify — GET what's actually on the campaign
+    current_accounts = await _api_call("GET", f"/campaigns/{campaign_id}/email-accounts", api_key)
+    current_ids = set()
+    if isinstance(current_accounts, list):
+        current_ids = {a.get("id") for a in current_accounts if a.get("id")}
+
+    # 4c: Remove unwanted accounts (if SmartLead auto-assigned extras)
+    to_remove = current_ids - desired_ids
+    if to_remove:
+        logger.info("Campaign %s: found %d unwanted auto-assigned accounts, removing...",
+                     campaign_id, len(to_remove))
+        # Delete per-account (pattern from magnum-opus fix_campaign_sequence.py)
+        sem = asyncio.Semaphore(10)  # 10 concurrent deletes
+        async def _delete_one(acc_id: int):
+            async with sem:
+                return await _api_call("DELETE",
+                    f"/campaigns/{campaign_id}/email-accounts/{acc_id}", api_key)
+        results = await asyncio.gather(
+            *[_delete_one(aid) for aid in to_remove], return_exceptions=True)
+        removed = sum(1 for r in results if r is not None and not isinstance(r, Exception))
+        logger.info("Campaign %s: removed %d/%d unwanted accounts",
+                     campaign_id, removed, len(to_remove))
+
+    # 4d: Final verify
+    if to_remove:  # only re-check if we had to clean up
+        final_accounts = await _api_call("GET", f"/campaigns/{campaign_id}/email-accounts", api_key)
+        if isinstance(final_accounts, list):
+            final_ids = {a.get("id") for a in final_accounts if a.get("id")}
+            extra = final_ids - desired_ids
+            accounts_ok = len(extra) == 0
+            if not accounts_ok:
+                logger.error("Campaign %s: still %d extra accounts after cleanup", campaign_id, len(extra))
+            else:
+                logger.info("Campaign %s: verified %d accounts (cleaned up %d)", campaign_id, len(final_ids), len(to_remove))
+        else:
+            accounts_ok = False
+    else:
+        accounts_ok = desired_ids.issubset(current_ids)
+        if accounts_ok:
+            logger.info("Campaign %s: %d accounts assigned, no cleanup needed", campaign_id, len(current_ids))
 
     setup_warnings = []
     if step2 is None:
         setup_warnings.append("schedule")
     if step3 is None:
         setup_warnings.append("settings")
-    if step4 is None:
+    if not accounts_ok:
         setup_warnings.append("email_accounts")
 
     # Step 5: save locally

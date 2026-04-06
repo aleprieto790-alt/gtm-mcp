@@ -1,7 +1,16 @@
-"""GTM-MCP Server — 43 thin tools, zero LLM calls. stdio transport via FastMCP."""
+"""GTM-MCP Server — 49 thin tools, zero LLM calls. stdio transport via FastMCP."""
+import logging
+import sys
 from pathlib import Path
 
 from fastmcp import FastMCP
+
+# Log SmartLead API calls to stderr (visible in Claude Code terminal)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(name)s %(levelname)s: %(message)s",
+    stream=sys.stderr,
+)
 
 from gtm_mcp.config import ConfigManager
 from gtm_mcp.workspace import WorkspaceManager
@@ -292,10 +301,19 @@ async def apollo_estimate_cost(
     target_count: int = 100,
     contacts_per_company: int = 3,
     target_rate: float = 0.35,
+    num_keywords: int = 0,
+    num_industries: int = 0,
+    has_funding_filter: bool = True,
+    probe_credits: int = 6,
 ) -> dict:
-    """Estimate Apollo credits needed for a pipeline run. No API call."""
+    """Estimate Apollo credits needed for a pipeline run. No API call.
+
+    Pass num_keywords and num_industries for accurate search credit estimate.
+    The streaming pipeline fires 1 request per keyword/industry (×2 with funding).
+    """
     from gtm_mcp.tools.apollo import apollo_estimate_cost as _impl
-    return _impl(target_count, contacts_per_company, target_rate)
+    return _impl(target_count, contacts_per_company, target_rate,
+                 num_keywords, num_industries, has_funding_filter, probe_credits)
 
 
 # ─── Scraping Tool ────────────────────────────────────────────────────────────
@@ -417,6 +435,7 @@ async def pipeline_gather_and_scrape(
     max_companies: int = 400,
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
+    keyword_start_pages: dict[str, int] | None = None,
 ) -> dict:
     """Atomic gather + scrape pipeline — ONE tool call, full streaming inside.
 
@@ -425,16 +444,56 @@ async def pipeline_gather_and_scrape(
     As domains arrive from Apollo, immediately queues them for scraping (100 concurrent Apify).
     Returns scraped_texts dict for classification agent prompts.
 
-    Typical: 300-400 companies gathered + scraped in 30-90 seconds.
+    keyword_start_pages: {keyword: start_page} — for continuation runs (Mode 3).
+    Previous run's leaderboard tracks last_page per keyword. Pass those to skip
+    already-fetched pages. e.g. {"payment gateway API": 2, "ad network": 3}
     """
     from gtm_mcp.tools.pipeline import pipeline_gather_and_scrape as _impl
     return await _impl(
         keywords, industry_tag_ids, locations, employee_ranges,
         funding_stages=funding_stages,
-        project=project, run_id=run_id,  # REQUIRED — auto-saves to run file
+        project=project, run_id=run_id,
         max_companies=max_companies,
         scrape_concurrent=scrape_concurrent,
         max_pages_per_stream=max_pages_per_stream,
+        keyword_start_pages=keyword_start_pages,
+        config=_config, workspace=_workspace,
+    )
+
+
+@mcp.tool()
+async def pipeline_people_to_push(
+    project: str,
+    run_id: str,
+    campaign_name: str,
+    sending_account_ids: list[int],
+    country: str,
+    segment: str,
+    sequence_steps: list[dict],
+    test_email: str = "",
+    max_people_per_company: int = 3,
+    create_sheet: bool = True,
+    mode: str = "create",
+    existing_campaign_id: int | None = None,
+) -> dict:
+    """Atomic post-classification → SmartLead. ONE call, ZERO LLM.
+
+    After classification (targets in run file), does EVERYTHING deterministically:
+    1. Load targets from run file
+    2. Search people (FREE) + enrich (1 credit/person)
+    3. Save contacts to contacts.json + run file + update totals
+    4. Export to Google Sheet
+    5. Push to SmartLead (create or append)
+    6. Update all tracking files
+
+    mode: "create" for new campaign, "append" for existing (pass existing_campaign_id).
+    Replaces 6+ agent tool calls. Eliminates post-classification errors.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_people_to_push as _impl
+    return await _impl(
+        project, run_id, campaign_name, sending_account_ids, country, segment,
+        sequence_steps, test_email, max_people_per_company=max_people_per_company,
+        create_sheet=create_sheet, mode=mode, existing_campaign_id=existing_campaign_id,
         config=_config, workspace=_workspace,
     )
 

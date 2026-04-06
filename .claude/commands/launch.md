@@ -38,6 +38,7 @@ Full pipeline: input → gather → qualify → SmartLead campaign. **Two human 
 
 | Task | WRONG (LLM) | RIGHT (deterministic tool) |
 |------|-------------|---------------------------|
+| Scrape 15-20 probe companies | 15 individual `scrape_website` calls (2+ min!) | `scrape_batch(urls=[...])` ONE call (~3s) |
 | Upload leads to SmartLead | Agent batching via LLM agent (4m 46s!) | `campaign_push` reads file, chunks 100 (~10s) |
 | Save contacts to run file | Agent load→update→write (fails) | `pipeline_save_contacts` (~1s) |
 | Compute keyword leaderboard | Agent computes inline (skips it) | `pipeline_compute_leaderboard` (~1s) |
@@ -66,7 +67,39 @@ Named params:
   segment=<name>        → target segment
   geo=<location>        → geography
   kpi=<number>          → target contacts (default 100, "+N" for relative)
-  max_cost=<credits>    → Apollo credit cap (default 200)
+  max_cost=<credits>    → Apollo credit cap (auto-calculated if not set)
+
+## Dynamic Scaling — ALL constants derive from KPI
+
+**NOTHING is hardcoded.** Every pipeline parameter scales from KPI + probe_target_rate:
+
+```
+# After probe, compute all pipeline parameters:
+target_rate = probe_target_rate                    # e.g. 0.77
+contacts_per_company = 3                           # avg
+scrape_loss = 0.85                                 # ~15% fail to scrape
+enrich_loss = 0.85                                 # ~15% enrichment miss
+
+needed_targets = ceil(kpi / contacts_per_company)  # KPI=50 → 17, KPI=100 → 34, KPI=200 → 67
+needed_companies = ceil(needed_targets / target_rate / scrape_loss)
+max_companies = max(50, ceil(needed_companies * 1.5))  # 1.5x safety margin, min 50
+max_credits = max(50, ceil(kpi * 2))               # rough 2x rule, min 50
+min_keywords = max(30, ceil(max_companies / 5))    # ~5 unique companies per keyword avg
+```
+
+**Examples at different KPIs:**
+
+| KPI | target_rate | needed_targets | needed_companies | max_companies | min_keywords | max_credits |
+|-----|:-----------:|:--------------:|:----------------:|:-------------:|:------------:|:-----------:|
+| 50  | 40% | 17 | 50  | **75**  | 30 | 100 |
+| 50  | 77% | 17 | 26  | **50**  | 30 | 100 |
+| 100 | 40% | 34 | 100 | **150** | 30 | 200 |
+| 100 | 77% | 34 | 52  | **78**  | 30 | 200 |
+| 200 | 40% | 67 | 197 | **296** | 60 | 400 |
+| 200 | 77% | 67 | 102 | **153** | 31 | 400 |
+| 500 | 40% | 167 | 491 | **737** | 148 | 1000 |
+
+**Use these computed values everywhere** — in `pipeline_gather_and_scrape(max_companies=...)`, keyword generation count, credit cap display, cost estimate.
 
 Free text:
   URL (starts with http)     → scrape for offer
@@ -123,11 +156,30 @@ Free text:
 2. Blacklist: look for SmartLead campaign URL, "blacklist campaign X", campaign ID
    → If found: pipeline_import_blacklist(project, campaign_id)
    → If NOT found: ASK "Any existing campaigns to blacklist? (URL/name/ID, or 'skip')"
+
+3. Geography: ALWAYS extract AND verify. This is the #1 source of wasted credits.
+   → Search scraped website/document for: "available in", "serving", "Excl.", "excluding",
+     "not available", "restricted", "sanctioned", geo pages, footer locations, legal terms
+   → Extract BOTH:
+     - target_locations: countries/regions where they WANT to reach clients
+     - excluded_locations: countries/regions they CANNOT serve ("Excl. US, UK", "sanctioned countries")
+   → If EXCLUSIONS found: REMOVE them from Apollo locations filter. Show user:
+     "Website says 'Excl. {excluded}'. I'll search {remaining_locations}. Correct?"
+   → If INCLUSIONS found: confirm with user:
+     "Website targets {locations}. Search these? Or broaden/narrow?"
+   → If NOTHING found about geo on website: ASK explicitly:
+     "No geo restrictions found on the website. Where should I search?
+      a) Worldwide (all countries)
+      b) Specific countries: ___
+      c) Exclude specific countries: ___"
+   → NEVER default to "US" silently. NEVER proceed without geo confirmation.
 ```
 
-**Mode 3: skip both** — accounts already on campaign, blacklist = auto-dedup from campaign export.
+**Run #5 (inxy) failed catastrophically here**: website said "Excl. sanctioned countries, UK and US" but agent searched IN US and UK. 14 of 22 contacts were US/UK-based — completely unusable. This wasted 65 credits on wrong-geo contacts.
 
-**The document should provide these.** A good outreach plan includes sender info and prior campaign context. If the user's document has this info, extract it — don't re-ask. Only ask when the input is genuinely missing this information.
+**Mode 3: skip accounts/blacklist** — but STILL verify geo matches the existing campaign's target regions.
+
+**The document should provide these.** A good outreach plan includes sender info, geo restrictions, and prior campaign context. If the user's document has this info, extract it — don't re-ask. Only ask when the input is genuinely missing this information.
 
 **Cache accounts in parallel** with offer extraction — `smartlead_list_accounts()` can run alongside `scrape_website()` in the same tool call batch.
 
@@ -273,32 +325,52 @@ save_data(project, "project.yaml", {
 - Generate **80-100 keywords minimum** (product names, not generic terms, seeded from examples)
 - Map locations and employee sizes
 
-**CRITICAL: Generate 80-100+ keywords, not 20-30.** Keywords are FREE (LLM generation). Each keyword fires a separate Apollo request discovering different companies. More keywords = more unique companies. The cost is per-page (1 credit each), but most keywords exhaust in 1 page. 100 keywords at 1 page each = 100 credits max, but the 400-company cap stops gathering long before all keywords are used.
+**CRITICAL: Generate at least `min_keywords` keywords (from Dynamic Scaling section).** Keywords are FREE (LLM generation). Each keyword fires a separate Apollo request discovering different companies. More keywords = more unique companies. The cost is per-page (1 credit each), but most keywords exhaust in 1 page. The `max_companies` cap stops gathering long before all keywords are used. For KPI=100 at 77% target rate: ~30 keywords. For KPI=200 at 40%: ~88 keywords. Always scale to KPI.
 
-**Probe (6 credits max):**
+**Probe (6 credits max) — ALL calls in parallel:**
 ```
-For tag_id in industry_tag_ids[:3]:
-  apollo_search_companies({organization_industry_tag_ids: [tag_id], organization_locations: [...], organization_num_employees_ranges: [...]})
-
-For keyword in keywords[:3]:
-  apollo_search_companies({q_organization_keyword_tags: [keyword], organization_locations: [...], organization_num_employees_ranges: [...]})
+# Fire all 6 Apollo requests in ONE message (parallel execution):
+apollo_search_companies({organization_industry_tag_ids: [tag_id_1], ...})
+apollo_search_companies({organization_industry_tag_ids: [tag_id_2], ...})
+apollo_search_companies({organization_industry_tag_ids: [tag_id_3], ...})
+apollo_search_companies({q_organization_keyword_tags: [keyword_1], ...})
+apollo_search_companies({q_organization_keyword_tags: [keyword_2], ...})
+apollo_search_companies({q_organization_keyword_tags: [keyword_3], ...})
 ```
+ALL 6 calls in ONE message = parallel. Do NOT call them sequentially.
 
 Collect probe_breakdown: companies per filter, total available.
 Dedup probe results by domain → `probe_companies` list.
 
-**Probe classification (0 credits — scrape + LLM only):**
+**Probe classification (0 credits — ONE batch scrape call):**
 
 Pick ~15-20 companies from probe results (mix of keyword and industry streams, skip obvious giants):
 ```
-For company in probe_companies[:20]:
-  scraped = scrape_website(company.domain)
-  → Classify using company-qualification skill (via negativa)
-  → Record: is_target, confidence, segment, reasoning
+# ONE deterministic batch call — scrapes all URLs in parallel internally:
+urls = [f"https://{c.domain}" for c in probe_companies[:20]]
+batch_result = scrape_batch(urls=urls)
+
+# Then classify from batch_result.data.results (each has .text if successful)
+→ Classify using company-qualification skill (via negativa)
+→ Record: is_target, confidence, segment, reasoning
 ```
+**NEVER call scrape_website in a loop.** Always use `scrape_batch` for multiple URLs.
+15-20 URLs scraped in ~3 seconds via one tool call, not 15-20 sequential calls taking 2+ minutes.
 
 Calculate `probe_target_rate` = targets / scraped_successfully.
-This is the REAL target rate from actual data — not a guess. Show examples in strategy doc:
+This is the REAL target rate from actual data — not a guess.
+
+**CRITICAL: Keep probe results for the main pipeline.** Probe companies are already scraped and classified — don't discard them. Save them so `pipeline_gather_and_scrape` deduplicates against them (won't re-fetch), and probe targets flow directly into people enrichment. 6 credits already spent on probe = 6 credits of usable data.
+
+```
+# Save probe results to run file immediately
+save_data(project, f"runs/{run_id}.json", {
+  probe: {breakdown, credits_used, companies_from_probe: len(probe_companies)},
+  probe_classified: probe_classifications  # {domain: {is_target, confidence, segment, reasoning}}
+}, mode="merge")
+```
+
+Show examples in strategy doc:
 ```
   PROBE CLASSIFICATION (20 sampled, 0 credits):
     Targets: 7/18 scraped (39%)
@@ -309,10 +381,21 @@ This is the REAL target rate from actual data — not a guess. Show examples in 
     ...
 ```
 
-**Estimate cost** using real probe target rate:
+**Estimate cost** using real probe target rate + actual keyword count:
 ```
-apollo_estimate_cost(target_count=kpi, contacts_per_company=3, target_rate=probe_target_rate)
+cost = apollo_estimate_cost(
+  target_count=kpi,
+  contacts_per_company=3,
+  target_rate=probe_target_rate,
+  num_keywords=len(keywords),         # CRITICAL: search credits scale with keyword count
+  num_industries=len(industry_tag_ids),
+  has_funding_filter=bool(funding_stages),
+  probe_credits=6
+)
+# max_credits is auto-calculated from KPI (see Dynamic Scaling) unless user specified max_cost=
 ```
+**Without num_keywords, the estimate is 11x off.** Each keyword fires a separate Apollo request (1 credit).
+104 keywords × 2 (funded/unfunded) × 1.3 pages = ~270 search credits. The old formula estimated 15.
 
 **Email accounts + blacklist: already asked upfront (see "Mandatory Questions" section above).**
 By this point, you already have: selected account IDs + blacklist saved to project.
@@ -342,7 +425,7 @@ save_data(project, "runs/run-001.json", {
   mode: "fresh",                        # or "append"
   status: "running",
   created_at: "{ISO timestamp}",
-  kpi: {target_people: kpi, max_people_per_company: 3, max_credits: max_cost},
+  kpi: {target_people: kpi, max_people_per_company: 3, max_credits: max_credits},  # max_credits from Dynamic Scaling
   dedup_baseline: {previous_run_companies: 0, previous_run_contacts: 0, seen_domains_count: 0, seen_emails_count: 0},
   probe: {breakdown: [...], credits_used: N, companies_from_probe: N},
   filter_snapshots: [{id: "fs-001", trigger: "initial_generation", filters: {...}}],
@@ -409,11 +492,18 @@ Strategy Document:
     ✗ {company_3} — {exclusion_reason}
     ✗ {company_4} — {exclusion_reason}
 
-  COST (based on {probe_target_rate}% real target rate):
-    ~{total} credits (${usd}), max cap: {max_cost}
-  KPI: {target} contacts, 3/company
-  Accounts: {N} selected
-  Sequence: GOD_SEQUENCE (4-5 steps)
+  COST (based on {probe_target_rate}% target rate, {actual_keywords} keywords):
+    Search:  ~{search_credits} credits (${search_usd})
+    People:  ~{people_credits} credits (${people_usd})
+    TOTAL:   ~{total_credits} credits (${total_usd})
+    MAX CAP: {max_credits} credits — pipeline STOPS if exceeded
+
+  CAMPAIGN SETUP:
+    KPI:         {kpi} contacts, 3/company
+    Companies:   max {max_companies} (auto-scaled from KPI + target rate)
+    Keywords:    {actual_keywords} generated (min {min_keywords})
+    Accounts:    {N} selected
+    Sequence:    {sequence_name} ({N} steps)
 
   Proceed?
 ```
@@ -449,13 +539,81 @@ save_data(project, "state.yaml", {..., phase_states: {cost_gate: "completed"}})
 
 Update state: `save_data(project, "state.yaml", {..., current_phase: "round_loop", phase_states: {round_loop: "in_progress"}})`
 
-### Mode 3 dedup setup
+### Phase 0: REUSE UNUSED TARGETS (before spending ANY credits)
+
+**This is the fastest path to contacts — already classified targets from previous runs that never had people extracted.**
+
+```
+# Load ALL previous runs for this project
+unused_targets = []
+for run_file in list_runs(project):  # runs/run-001.json, run-002.json, etc.
+  prev = load_data(project, f"runs/{run_file}")
+  if not prev: continue
+  
+  # Find targets that were classified but never enriched
+  prev_contacts = {c.get("company_domain") for c in prev.get("contacts", [])}
+  for domain, company in prev.get("companies", {}).items():
+    cls = company.get("classification", {})
+    if cls.get("is_target") and domain not in prev_contacts:
+      unused_targets.append({**company, "_source_run": run_file})
+
+# Also check contacts.json for project-level dedup
+existing_contacts = load_data(project, "contacts.json") or []
+enriched_domains = {c.get("company_domain") for c in existing_contacts}
+unused_targets = [t for t in unused_targets if t["domain"] not in enriched_domains]
+```
+
+**If unused targets exist — skip straight to people enrichment:**
+```
+if unused_targets:
+  # Sort by confidence (best targets first)
+  unused_targets.sort(key=lambda t: -t.get("classification", {}).get("confidence", 0))
+  
+  # How many do we need?
+  needed_companies = ceil(kpi / contacts_per_company)  # e.g. 34 for KPI=100
+  batch = unused_targets[:needed_companies]
+  
+  # Skip Phase A (gather) + Phase B (classify) entirely
+  # Go directly to Phase C (people enrichment) with these targets
+  target_domains = [t["domain"] for t in batch]
+  
+  # Log what we're reusing
+  "Reusing {len(batch)} pre-classified targets from previous runs.
+   Skipping gather + scrape + classify. Going straight to people enrichment.
+   Saved: ~{estimated_search_credits} search credits, ~{len(batch) * 3}s scrape time, $0 LLM classify."
+  
+  # If batch covers KPI → Phase C directly (ZERO Apollo search credits)
+  # If batch < needed → Phase C for batch, THEN Phase A for the delta
+  remaining_kpi = kpi - (len(batch) * contacts_per_company)
+  if remaining_kpi > 0:
+    # Recalculate dynamic scaling for the smaller delta
+    delta_kpi = remaining_kpi
+    delta_max_companies = max(50, ceil(delta_kpi / contacts_per_company / target_rate / scrape_loss * 1.5))
+    # Continue to Phase A with reduced max_companies
+```
+
+**Why this matters:**
+- KPI=100, 162 unused targets from run-001 → **ZERO gather/scrape/classify needed**
+- Mode 2 new segment on same project → reuse targets from different segment? No — segments differ. Only reuse same-segment targets.
+- Mode 3 append → YES, reuse all unused targets from the same campaign's runs
+
+**This is the FIRST thing checked in Step 4. Before any Apollo API call.**
+
+### Mode 3 dedup + page continuation setup
 ```
 For run_id in campaign.run_ids:
   prev = load_data(project, f"runs/{run_id}.json")
   seen_domains.add(prev.companies.keys())
 existing = smartlead_export_leads(campaign_id)
 seen_emails = {lead.email for lead in existing.leads}
+
+# Build keyword_start_pages from previous run's leaderboard
+# So we don't re-fetch page 1 (already got those companies → now in seen_domains)
+keyword_start_pages = {}
+for entry in prev.keyword_leaderboard:
+  if entry.get("next_page"):  # not exhausted
+    keyword_start_pages[entry["filter_value"]] = entry["next_page"]
+  # Skip exhausted keywords entirely (next_page = null)
 ```
 
 ### Phase A: GATHER + SCRAPE — one atomic streaming tool call (~30-90s)
@@ -464,14 +622,15 @@ seen_emails = {lead.email for lead in existing.leads}
 
 ```
 result = pipeline_gather_and_scrape(
-  keywords=approved_keywords,          # 20-30 keywords from Step 2
+  keywords=approved_keywords,          # min_keywords from Dynamic Scaling section
   industry_tag_ids=approved_tag_ids,   # 2-3 tag_ids from Step 2
   locations=approved_locations,
   employee_ranges=approved_ranges,
   funding_stages=approved_funding,     # or null
-  max_companies=400,
+  max_companies=max_companies,         # from Dynamic Scaling (KPI-driven, NOT hardcoded 400)
   scrape_concurrent=100,
-  max_pages_per_stream=5
+  max_pages_per_stream=5,
+  keyword_start_pages=keyword_start_pages,  # Mode 3: skip already-fetched pages
 )
 ```
 
@@ -481,7 +640,7 @@ result = pipeline_gather_and_scrape(
 3. As EACH domain arrives from Apollo → immediately queued for scraping
 4. 100 concurrent Apify scrape workers consume the queue
 5. Low-yield streams auto-stop (<10 on page 1)
-6. Stops at 400 unique companies
+6. Stops at `max_companies` unique companies (from Dynamic Scaling)
 7. Returns: companies with scraped text + all request tracking + timestamps
 
 **This is the magnum-opus streaming pattern implemented as one MCP tool.**
@@ -557,8 +716,10 @@ Agent(
     RULES:
     - Classify from the TEXT BELOW only. NEVER re-scrape. NEVER call scrape_website or Fetch.
     - Via negativa: focus on EXCLUDING non-matches
-    - For each: is_target (bool), confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning (1 sentence)
+    - For each: is_target (bool), confidence (0-100), segment (CAPS_SNAKE_CASE), reasoning (3-5 sentences)
     - For non-targets: set segment to the REJECTION reason (e.g. B2C_CONSUMER, COMPETITOR)
+    - REASONING MUST cite specific evidence from the scraped text (product names, features, pricing)
+    - NEVER write generic reasoning like 'B2B company in PAYMENTS segment' — cite WHAT they do from website
 
     SAVE TO CHUNK FILE (NOT the run file!):
       save_data('{project}', 'classify_chunk_{N}.json',
@@ -609,28 +770,42 @@ This guarantees ALL classified companies survive. Zero data loss.
 
 Record: `round.timestamps.classify_completed = "{now}"`
 
-### Phase C: PEOPLE — batch search + batch enrich (~20-30s)
+### Phase C+D+E: PEOPLE → CONTACTS → SHEET → CAMPAIGN — ONE atomic tool
 
-Record: `round.timestamps.people_started = "{now}"`
+**After classification, ONE tool call does EVERYTHING. Zero agent decisions.**
 
 ```
-# Collect all target domains
-target_domains = [d for d, c in companies.items() if c.classification.is_target]
-
-# ONE tool call: search all targets in parallel (FREE, 20 concurrent)
-search_results = apollo_search_people_batch(target_domains, person_seniorities=[...], per_page=10)
-
-# Collect top 3 person IDs per company, flatten
-all_person_ids = []
-for result in search_results.data.results:
-  top_3 = [p.id for p in result.people[:3]]
-  all_person_ids.extend(top_3)
-
-# ONE tool call: enrich all people (auto-chunks to 10, 1 credit per verified email)
-enriched = apollo_enrich_people(all_person_ids)
+result = pipeline_people_to_push(
+  project=project_slug,
+  run_id=run_id,
+  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Sally Fintech PAYMENTS 07/04"
+  sending_account_ids=selected_account_ids,
+  country=country_code,
+  segment=segment_name,
+  sequence_steps=sequence_steps,        # from Step 6 or from document
+  test_email=user_email,
+  max_people_per_company=3,
+  create_sheet=true,
+  mode="create",                        # or "append" for Mode 3
+  existing_campaign_id=campaign_id,     # only for Mode 3
+)
+→ Returns: {targets, contacts, people_credits, total_credits, kpi_met,
+            campaign_id, leads_uploaded, sheet_url}
 ```
 
-**Two tool calls total for all people extraction.** Not per-company. Not per-person.
+**What happens INSIDE this one call:**
+1. Load target domains from run file (from classification)
+2. `apollo_search_people_batch` — all targets in parallel (FREE)
+3. `apollo_enrich_people` — bulk enrich (1 credit per verified email)
+4. Save contacts to contacts.json + run file + update totals + set kpi_met + mark people_extracted
+5. Export to Google Sheet (auto-share with user_email)
+6. Save leads_for_push.json
+7. Create SmartLead campaign + sequence + upload leads + test email (Mode 1/2)
+   OR append leads to existing campaign + update campaign.yaml (Mode 3)
+8. Update all tracking files
+
+**This replaces 6+ separate tool calls and eliminates ALL post-classification errors.**
+Fixes: contacts not in run file (#72), campaign.yaml not updated (#73), credit accounting (#64).
 
 Record: `round.timestamps.people_completed = "{now}"`
 
@@ -645,15 +820,21 @@ If not enough targets → next keyword batch (Round 2)
 **CRITICAL: Save EVERYTHING to the run file.** Test Run #1 failed because contacts and campaign data weren't saved.
 
 ```
-# 1. Save contacts to BOTH contacts.json AND run file
+# 1. Mark enriched companies (so Phase 0 knows which targets are "used")
+for domain in target_domains:
+  if domain in companies:
+    companies[domain]["people_extracted"] = true
+
+# 2. Save contacts to BOTH contacts.json AND run file
 save_data(project, "contacts.json", all_contacts, mode="write")
 save_data(project, "runs/{run_id}.json", {
+  companies: companies,                  # includes people_extracted=true flags
   contacts: all_contacts,
   totals: {
     ...existing_totals,
     contacts_extracted: len(all_contacts),
     kpi_met: len(all_contacts) >= kpi.target_people,
-    total_credits: search_credits + people_credits
+    total_credits: total_credits_search + people_credits  # FIX #64: sum ALL credits
   }
 }, mode="merge")
 
@@ -781,20 +962,25 @@ enriched = apollo_enrich_people(person_ids=all_person_ids)
 
 **Contact dedup**: skip duplicate emails within run. Mode 3: also skip `seen_emails`.
 
-**Save contacts — use deterministic tool (not manual load→update→write).**
+**CRITICAL: Save contacts via pipeline_save_contacts — NOT manual save_data.**
+
+This has been broken in EVERY test run. The agent saves contacts.json but forgets the run file.
+`pipeline_save_contacts` saves to BOTH files AND updates totals AND sets kpi_met in one atomic call.
 
 ```
-# ONE tool call: saves to contacts.json + run file + updates totals + sets kpi_met
+# MANDATORY — ONE tool call for ALL contact saving:
 pipeline_save_contacts(
   project=project_slug,
   run_id=run_id,
   contacts=all_contacts,
-  search_credits=search_credits,
-  people_credits=people_credits
+  search_credits=total_credits_search,  # from gather (including probe)
+  people_credits=len(verified_contacts)  # 1 credit per verified contact
 )
 ```
 
-This is deterministic — no LLM needed. Fixes the persistent bug from Run #1 and #2.
+**NEVER save contacts manually with save_data.** NEVER save contacts.json separately.
+This ONE call handles: contacts.json + run file contacts + totals.total_credits + totals.kpi_met.
+Fixes Run #1 (0 contacts in run file), Run #2 (0 contacts), Run #4 (OK but fragile), Run #5 (0 contacts).
 
 ```
 save_data(project, "state.yaml", {
@@ -856,6 +1042,17 @@ save_data(project, "state.yaml", {..., phase_states: {sequence_generation: "comp
 
 Update state: `save_data(project, "state.yaml", {..., current_phase: "campaign_push", phase_states: {campaign_push: "in_progress"}})`
 
+### Campaign naming convention
+
+**Format: `{project_name} {segment_name} {DD/MM}`**
+
+Examples:
+- "Sally Fintech PAYMENTS 07/04"
+- "Inxy Affiliate NETWORKS 07/04"
+- "EasyStaff LENDING 15/03"
+
+NEVER use generic names like "Fintech — Global" or "Campaign 1".
+
 ### Create campaign + upload leads — ONE atomic tool call (Mode 1/2)
 
 **Do NOT call smartlead_create_campaign, smartlead_set_sequence, smartlead_add_leads separately.**
@@ -868,7 +1065,7 @@ save_data(project, "leads_for_push.json", all_leads_array)
 # ONE tool call: create → sequence → upload all leads → test email
 result = campaign_push(
   project=project_slug,
-  campaign_name="{Segment} — {Geo}",
+  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Inxy Affiliate NETWORKS 07/04"
   sending_account_ids=selected_account_ids,
   country=country_code,
   segment=segment_name,
@@ -880,6 +1077,34 @@ result = campaign_push(
 ```
 
 This replaces 4+ separate tool calls. Zero LLM needed. ~10 seconds total.
+
+### Mode 3 (append): Add leads to EXISTING campaign — NOT campaign_push
+
+**Mode 3 does NOT create a new campaign.** The campaign already exists in SmartLead.
+
+```
+# Save leads file
+save_data(project, "leads_for_push.json", all_leads_array)
+
+# Add leads to existing campaign (chunks of 100 internally)
+smartlead_add_leads(campaign_id=existing_campaign_id, leads=all_leads_array)
+
+# MANDATORY: Update local campaign.yaml with new totals
+campaign_yaml = load_data(project, f"campaigns/{slug}/campaign.yaml")
+save_data(project, f"campaigns/{slug}/campaign.yaml", {
+  total_leads_pushed: campaign_yaml.total_leads_pushed + len(all_leads_array),
+  run_ids: [...campaign_yaml.run_ids, run_id]
+}, mode="merge")
+
+# Update run file
+save_data(project, f"runs/{run_id}.json", {
+  campaign_id: existing_campaign_id,
+  campaign_slug: slug,
+  campaign: {campaign_id: existing_campaign_id, leads_pushed: len(all_leads_array), pushed_at: "{now}"}
+}, mode="merge")
+```
+
+**Run #5 (inxy) failed here**: leads uploaded to SmartLead (452 correct) but campaign.yaml still shows 430 and run_ids=[].
 
 ### Update tracking — ALL THREE files must be updated
 
@@ -937,16 +1162,38 @@ else:
 ### Present for activation
 
 ```
-Campaign Ready (DRAFT):
+Campaign Ready (DRAFT) — Checkpoint 2:
+
   SmartLead: https://app.smartlead.ai/app/email-campaigns-v2/{id}/analytics
-  Settings: plain text ✓, no tracking ✓, 40% followup ✓
-  Accounts: {N} assigned
-  Sequence: {N} steps set
-  Contacts: {N} verified → uploaded
   Google Sheet: {url}
-  Test email sent to {user_email} — check your inbox.
-  Cost: {total} credits
-  Stats: {companies} → {targets} targets → {contacts} contacts
+
+  Accounts:   {N} assigned
+  Sequence:   {sequence_name} — {N} steps (Day {cadence})
+  Contacts:   {N} verified → uploaded
+  Test email: sent to {user_email} — check your inbox
+
+  COST:
+    Search:   {search_credits} credits (${search_usd})
+    People:   {people_credits} credits (${people_usd})
+    TOTAL:    {total_credits} credits (${total_usd})
+
+  PIPELINE STATS:
+    {total_companies} gathered → {scraped} scraped ({scrape_pct}%) → {targets} targets ({target_pct}%) → {contacts} contacts
+    {companies_with_contacts} companies, avg {avg_contacts_per_company} contacts/company
+    Segments: {segment_breakdown}
+
+  TOP KEYWORDS (by quality score):
+    "{keyword_1}" — {target_rate}% target rate, {companies} companies
+    "{keyword_2}" — {target_rate}% target rate, {companies} companies
+    "{keyword_3}" — {target_rate}% target rate, {companies} companies
+    "{keyword_4}" — {target_rate}% target rate, {companies} companies
+
+  UNUSED TARGETS — next run sweetest spot:
+    {unused_count} pre-classified targets available (not yet enriched)
+    Segments: {unused_segment_breakdown}
+    Estimated contacts: ~{unused_count * avg_contacts_per_company} (at {avg_contacts_per_company}/company)
+    Estimated cost: ~{unused_count * contacts_per_company} people credits only ($X) — ZERO search/scrape/classify
+    → Run `/launch project={project_slug} kpi={unused_contacts}` to harvest for free
 
   Type "activate" to start sending.
 ```
