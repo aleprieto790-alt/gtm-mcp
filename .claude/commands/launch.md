@@ -973,9 +973,11 @@ pipeline_save_contacts(
   project=project_slug,
   run_id=run_id,
   contacts=all_contacts,
-  search_credits=total_credits_search,  # from gather (including probe)
   people_credits=len(verified_contacts)  # 1 credit per verified contact
 )
+# Credits computed FROM run file automatically:
+# total_credits = probe (from run.probe) + search (from gather) + people
+# Agent does NOT pass search_credits — eliminates accounting bugs.
 ```
 
 **NEVER save contacts manually with save_data.** NEVER save contacts.json separately.
@@ -1283,3 +1285,72 @@ Which approach? Or type "proceed with {contacts}" to create the campaign now.
 ```
 
 **The agent MUST suggest concrete next steps based on the keyword_leaderboard data.** Never just say "not enough contacts" and stop.
+
+---
+
+## "Gather More" — Continuation After KPI Met
+
+**When the user says "gather 50 more" / "add 50 contacts" / "find more" after a completed run:**
+
+This triggers Mode 3 continuation. The flow is deterministic:
+
+```
+# Step 1: Prepare continuation state (ONE deterministic tool call)
+state = pipeline_prepare_continuation(
+  project=project_slug,
+  campaign_ref=campaign_id_or_slug,
+  additional_kpi=50
+)
+
+# Step 2: Check Phase 0 — can unused targets cover KPI?
+if state.data.phase_0_sufficient:
+  # FAST PATH: Zero search credits. Just enrich unused targets.
+  pipeline_people_to_push(
+    project=project_slug,
+    run_id=state.data.new_run_id,
+    campaign_name=existing_campaign_name,
+    sending_account_ids=existing_account_ids,
+    country=country, segment=segment,
+    sequence_steps=existing_sequence,
+    mode="append",
+    existing_campaign_id=state.data.campaign_id,
+    include_domains=state.data.unused_targets.domains[:needed],  # Phase 0
+    exclude_emails=existing_campaign_emails,
+  )
+  # DONE. Show: "Added {N} contacts from {unused} pre-classified targets. $X people credits only."
+
+# Step 3: If Phase 0 insufficient — gather more + classify + push
+else:
+  # 3a. Enrich whatever unused targets exist (partial Phase 0)
+  if state.data.unused_targets.count > 0:
+    # Enrich unused targets first, reduce remaining KPI
+    # ... (call pipeline_people_to_push with include_domains for the partial batch)
+  
+  # 3b. Gather new companies with page continuation
+  pipeline_gather_and_scrape(
+    keywords=state.data.continuation_filters.keywords,
+    industry_tag_ids=state.data.continuation_filters.industry_tag_ids,
+    locations=state.data.continuation_filters.locations,
+    employee_ranges=state.data.continuation_filters.employee_ranges,
+    keyword_start_pages=state.data.keyword_start_pages,  # skip fetched pages
+    max_companies=state.data.dynamic_scaling.max_companies,
+    max_credits=state.data.dynamic_scaling.max_credits,
+    project=project_slug,
+    run_id=state.data.new_run_id,
+  )
+  
+  # 3c. Classify new companies (LLM — spawn Haiku agents)
+  # ... same as normal Phase B
+  
+  # 3d. Push to campaign
+  pipeline_people_to_push(
+    ..., mode="append", existing_campaign_id=state.data.campaign_id,
+  )
+```
+
+**Key benefits:**
+- `pipeline_prepare_continuation` computes EVERYTHING the agent needs (zero math)
+- Phase 0 = zero search credits (just people enrichment on pre-classified targets)
+- `keyword_start_pages` skips already-fetched pages
+- `max_credits` enforces budget
+- `exclude_emails` deduplicates against existing campaign contacts

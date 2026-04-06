@@ -411,15 +411,16 @@ async def pipeline_compute_leaderboard(project: str, run_id: str) -> dict:
 @mcp.tool()
 async def pipeline_save_contacts(
     project: str, run_id: str, contacts: list[dict],
-    search_credits: int = 0, people_credits: int = 0,
+    people_credits: int = 0,
 ) -> dict:
     """Deterministic save: contacts to BOTH contacts.json AND run file.
 
-    Updates run totals (credits, kpi_met). One call, no LLM needed.
-    Fixes bug where contacts were in contacts.json but missing from run file.
+    Credits computed FROM run file (probe + search already saved by gather tool).
+    total_credits = probe + search + people (always correct, agent can't mess it up).
+    Also marks people_extracted on companies for Phase 0 reuse.
     """
     from gtm_mcp.tools.pipeline import pipeline_save_contacts as _impl
-    return await _impl(project, run_id, contacts, search_credits, people_credits,
+    return await _impl(project, run_id, contacts, people_credits,
                        workspace=_workspace)
 
 
@@ -436,17 +437,16 @@ async def pipeline_gather_and_scrape(
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
     keyword_start_pages: dict[str, int] | None = None,
+    max_credits: int | None = None,
 ) -> dict:
     """Atomic gather + scrape pipeline — ONE tool call, full streaming inside.
 
     project + run_id REQUIRED — auto-saves companies + requests + round data to run file.
     Fires all Apollo searches in parallel (1 keyword/industry per request).
     As domains arrive from Apollo, immediately queues them for scraping (100 concurrent Apify).
-    Returns scraped_texts dict for classification agent prompts.
 
-    keyword_start_pages: {keyword: start_page} — for continuation runs (Mode 3).
-    Previous run's leaderboard tracks last_page per keyword. Pass those to skip
-    already-fetched pages. e.g. {"payment gateway API": 2, "ad network": 3}
+    keyword_start_pages: {keyword: start_page} for continuation (Mode 3).
+    max_credits: stop gathering when this many credits spent (budget enforcement).
     """
     from gtm_mcp.tools.pipeline import pipeline_gather_and_scrape as _impl
     return await _impl(
@@ -457,8 +457,31 @@ async def pipeline_gather_and_scrape(
         scrape_concurrent=scrape_concurrent,
         max_pages_per_stream=max_pages_per_stream,
         keyword_start_pages=keyword_start_pages,
+        max_credits=max_credits,
         config=_config, workspace=_workspace,
     )
+
+
+@mcp.tool()
+async def pipeline_prepare_continuation(
+    project: str,
+    campaign_ref: str,
+    additional_kpi: int = 50,
+) -> dict:
+    """Deterministic continuation state builder for "gather more". ZERO LLM.
+
+    Reads previous run state and returns everything needed:
+    - unused_targets (classified but not enriched — FREE to harvest)
+    - keyword_start_pages (skip already-fetched pages)
+    - dynamic_scaling (max_companies, max_credits)
+    - phase_0_sufficient (can unused targets alone cover KPI?)
+    - continuation_filters (reuse from previous run)
+
+    Call this FIRST in Mode 3, then use the returned data to call
+    pipeline_people_to_push (Phase 0) or pipeline_gather_and_scrape (new gather).
+    """
+    from gtm_mcp.tools.pipeline import pipeline_prepare_continuation as _impl
+    return await _impl(project, campaign_ref, additional_kpi, workspace=_workspace)
 
 
 @mcp.tool()
@@ -475,25 +498,29 @@ async def pipeline_people_to_push(
     create_sheet: bool = True,
     mode: str = "create",
     existing_campaign_id: int | None = None,
+    include_domains: list[str] | None = None,
+    exclude_emails: list[str] | None = None,
 ) -> dict:
     """Atomic post-classification → SmartLead. ONE call, ZERO LLM.
 
     After classification (targets in run file), does EVERYTHING deterministically:
-    1. Load targets from run file
+    1. Load targets from run file (or use include_domains for Phase 0 reuse)
     2. Search people (FREE) + enrich (1 credit/person)
-    3. Save contacts to contacts.json + run file + update totals
+    3. Save contacts + update totals (credits computed from run file, not passed)
     4. Export to Google Sheet
     5. Push to SmartLead (create or append)
     6. Update all tracking files
 
     mode: "create" for new campaign, "append" for existing (pass existing_campaign_id).
-    Replaces 6+ agent tool calls. Eliminates post-classification errors.
+    include_domains: Phase 0 — use these domains instead of reading from classification.
+    exclude_emails: Mode 3 — skip emails already in campaign.
     """
     from gtm_mcp.tools.pipeline import pipeline_people_to_push as _impl
     return await _impl(
         project, run_id, campaign_name, sending_account_ids, country, segment,
         sequence_steps, test_email, max_people_per_company=max_people_per_company,
         create_sheet=create_sheet, mode=mode, existing_campaign_id=existing_campaign_id,
+        include_domains=include_domains, exclude_emails=exclude_emails,
         config=_config, workspace=_workspace,
     )
 

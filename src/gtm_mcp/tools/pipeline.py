@@ -29,6 +29,7 @@ async def pipeline_gather_and_scrape(
     scrape_concurrent: int = 100,
     max_pages_per_stream: int = 5,
     keyword_start_pages: dict[str, int] | None = None,
+    max_credits: int | None = None,
     *,
     project: str,
     run_id: str,
@@ -83,6 +84,8 @@ async def pipeline_gather_and_scrape(
         start = _start_pages.get(filter_value, 1)
         for page in range(start, start + max_pages_per_stream):
             if len(seen_domains) >= max_companies:
+                break
+            if max_credits and req_counter >= max_credits:
                 break
 
             filters: dict[str, Any] = {
@@ -259,10 +262,14 @@ async def pipeline_gather_and_scrape(
         existing_run = workspace.load(project, run_path) or {}
         existing_run["companies"] = response_companies
         existing_run["requests"] = requests
+        # Read probe credits from run file (agent saved them before calling this tool)
+        probe_credits = existing_run.get("probe", {}).get("credits_used", 0)
         existing_run["totals"] = {
             **existing_run.get("totals", {}),
             "total_api_requests": len(requests),
+            "total_credits_probe": probe_credits,
             "total_credits_search": total_credits,
+            "total_credits": probe_credits + total_credits,  # running total (people added later)
             "unique_companies": len(companies),
             "companies_scraped": sum(1 for c in companies.values() if c.get("scrape", {}).get("status") == "success"),
         }
@@ -521,17 +528,17 @@ async def pipeline_save_contacts(
     project: str,
     run_id: str,
     contacts: list[dict],
-    search_credits: int = 0,
     people_credits: int = 0,
     *,
     workspace=None,
+    **_kwargs,  # absorb deprecated search_credits if agent passes it
 ) -> dict:
     """Deterministic save: contacts to BOTH contacts.json AND run file.
 
-    Also updates run totals (credits, kpi_met). One tool call, no LLM needed.
-    Fixes the persistent bug where contacts were in contacts.json but not run file.
+    Credits are computed FROM the run file, never passed by the agent.
+    total_credits = probe + search + people (always correct, agent can't mess it up).
+    Also marks people_extracted on companies for Phase 0 reuse.
     """
-    import json
     workspace = workspace or _default_workspace()
 
     # 1. Save contacts.json
@@ -553,12 +560,20 @@ async def pipeline_save_contacts(
         if domain in companies:
             companies[domain]["people_extracted"] = True
 
+    # Credits computed FROM run file — never passed by agent
+    existing_totals = run_data.get("totals", {})
+    probe_credits = existing_totals.get("total_credits_probe",
+                      run_data.get("probe", {}).get("credits_used", 0))
+    search_credits = existing_totals.get("total_credits_search", 0)
+    total = probe_credits + search_credits + people_credits
+
     run_data["totals"] = {
-        **run_data.get("totals", {}),
+        **existing_totals,
         "contacts_extracted": len(contacts),
         "kpi_met": len(contacts) >= kpi_target,
+        "total_credits_probe": probe_credits,
         "total_credits_people": people_credits,
-        "total_credits": search_credits + people_credits,
+        "total_credits": total,
     }
 
     workspace.save(project, run_path, run_data)
@@ -569,7 +584,175 @@ async def pipeline_save_contacts(
             "contacts_saved": len(contacts),
             "kpi_met": len(contacts) >= kpi_target,
             "kpi_target": kpi_target,
-            "total_credits": search_credits + people_credits,
+            "total_credits": total,
+            "credits_breakdown": {
+                "probe": probe_credits,
+                "search": search_credits,
+                "people": people_credits,
+            },
+        },
+    }
+
+
+async def pipeline_prepare_continuation(
+    project: str,
+    campaign_ref: str,
+    additional_kpi: int = 50,
+    contacts_per_company: int = 3,
+    *,
+    workspace=None,
+) -> dict:
+    """Deterministic continuation state builder. ONE call, ZERO LLM.
+
+    Reads previous run state and returns everything needed for "gather more":
+    - unused_targets (classified but not enriched — FREE to harvest)
+    - keyword_start_pages (skip already-fetched pages)
+    - dynamic_scaling (max_companies, max_credits from KPI + target_rate)
+    - phase_0_sufficient (can unused targets alone cover KPI?)
+
+    The agent uses this to decide: Phase 0 only, or Phase 0 + new gather.
+    """
+    import math
+    workspace = workspace or _default_workspace()
+
+    # 1. Find campaign
+    campaign_data = None
+    campaign_slug = None
+    campaign_id = None
+
+    # Try by ID
+    if campaign_ref.isdigit():
+        campaign_id = int(campaign_ref)
+    # Try by slug — scan campaigns dirs
+    project_dir = workspace.base / "projects" / project
+    campaigns_dir = project_dir / "campaigns"
+    if campaigns_dir.exists():
+        for slug_dir in campaigns_dir.iterdir():
+            camp_file = slug_dir / "campaign.yaml"
+            if camp_file.exists():
+                import yaml
+                camp = yaml.safe_load(camp_file.read_text())
+                if (campaign_ref.isdigit() and camp.get("campaign_id") == campaign_id) or \
+                   camp.get("slug") == campaign_ref or camp.get("name") == campaign_ref:
+                    campaign_data = camp
+                    campaign_slug = camp.get("slug") or slug_dir.name
+                    campaign_id = camp.get("campaign_id")
+                    break
+
+    if not campaign_data:
+        return {"success": False, "error": f"Campaign '{campaign_ref}' not found in project {project}"}
+
+    # 2. Load last run
+    run_ids = campaign_data.get("run_ids", [])
+    last_run = None
+    last_run_id = None
+    if run_ids:
+        last_run_id = run_ids[-1]
+        last_run = workspace.load(project, f"runs/{last_run_id}.json")
+
+    if not last_run:
+        # Scan for any run file
+        runs_dir = project_dir / "runs"
+        if runs_dir.exists():
+            run_files = sorted(runs_dir.glob("run-*.json"))
+            if run_files:
+                last_run_id = run_files[-1].stem
+                import json
+                last_run = json.loads(run_files[-1].read_text())
+
+    if not last_run:
+        return {"success": False, "error": f"No previous run found for project {project}"}
+
+    # 3. Count unused targets
+    companies = last_run.get("companies", {})
+    contacts = last_run.get("contacts", [])
+    contact_domains = {c.get("company_domain") for c in contacts}
+
+    # Also load project-level contacts for cross-run dedup
+    all_contacts = workspace.load(project, "contacts.json") or []
+    all_contact_domains = {c.get("company_domain") for c in all_contacts}
+
+    unused_targets = []
+    for domain, comp in companies.items():
+        cls = comp.get("classification", {})
+        if cls.get("is_target") and not comp.get("people_extracted") and domain not in all_contact_domains:
+            unused_targets.append(domain)
+
+    # 4. Build keyword_start_pages from leaderboard
+    leaderboard = last_run.get("keyword_leaderboard", [])
+    keyword_start_pages = {}
+    exhausted_keywords = []
+    for entry in leaderboard:
+        kw = entry.get("filter_value", "")
+        if entry.get("next_page"):
+            keyword_start_pages[kw] = entry["next_page"]
+        elif entry.get("exhausted"):
+            exhausted_keywords.append(kw)
+
+    # 5. Get filters from last run
+    filter_snapshots = last_run.get("filter_snapshots", [])
+    last_filters = filter_snapshots[-1].get("filters", {}) if filter_snapshots else {}
+
+    # 6. Compute dynamic scaling
+    last_totals = last_run.get("totals", {})
+    targets_count = last_totals.get("targets", 0)
+    classified_count = last_totals.get("companies_classified", 0)
+    target_rate = targets_count / classified_count if classified_count > 0 else 0.35
+    scrape_loss = 0.85
+
+    needed_companies = math.ceil(additional_kpi / contacts_per_company)
+    phase_0_sufficient = len(unused_targets) >= needed_companies
+
+    # If Phase 0 doesn't cover it, compute gather params for the delta
+    if not phase_0_sufficient:
+        delta_needed = needed_companies - len(unused_targets)
+        gather_companies = max(50, math.ceil(delta_needed / target_rate / scrape_loss * 1.5))
+    else:
+        gather_companies = 0
+
+    # 7. Compute new run_id
+    existing_runs = sorted((project_dir / "runs").glob("run-*.json")) if (project_dir / "runs").exists() else []
+    next_num = len(existing_runs) + 1
+    new_run_id = f"run-{next_num:03d}"
+
+    # 8. Collect all seen domains for dedup
+    seen_domains = set()
+    for run_file in existing_runs:
+        try:
+            import json
+            rd = json.loads(run_file.read_text())
+            seen_domains.update(rd.get("companies", {}).keys())
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "data": {
+            "project": project,
+            "campaign_id": campaign_id,
+            "campaign_slug": campaign_slug,
+            "prev_run_id": last_run_id,
+            "new_run_id": new_run_id,
+            "unused_targets": {
+                "count": len(unused_targets),
+                "domains": unused_targets[:200],  # cap response size
+                "estimated_contacts": len(unused_targets) * contacts_per_company,
+            },
+            "continuation_filters": last_filters,
+            "keyword_start_pages": keyword_start_pages,
+            "exhausted_keywords": exhausted_keywords,
+            "seen_domains_count": len(seen_domains),
+            "dynamic_scaling": {
+                "kpi": additional_kpi,
+                "target_rate": round(target_rate, 3),
+                "max_companies": gather_companies,
+                "max_credits": max(50, math.ceil(additional_kpi * 2)),
+            },
+            "phase_0_sufficient": phase_0_sufficient,
+            "previous_totals": {
+                "credits": last_totals.get("total_credits", 0),
+                "contacts": last_totals.get("contacts_extracted", 0),
+            },
         },
     }
 
@@ -588,6 +771,8 @@ async def pipeline_people_to_push(
     create_sheet: bool = True,
     mode: str = "create",
     existing_campaign_id: int | None = None,
+    include_domains: list[str] | None = None,
+    exclude_emails: list[str] | None = None,
     *,
     config=None,
     workspace=None,
@@ -595,7 +780,7 @@ async def pipeline_people_to_push(
     """Atomic post-classification → SmartLead ready. ONE call, ZERO LLM.
 
     After classification is done (targets in run file), this tool does EVERYTHING:
-    1. Load target domains from run file
+    1. Load target domains from run file (or use include_domains for Phase 0)
     2. apollo_search_people_batch — search all targets (FREE)
     3. apollo_enrich_people — bulk enrich (1 credit per verified email)
     4. Save contacts to contacts.json + run file + update totals
@@ -605,21 +790,27 @@ async def pipeline_people_to_push(
 
     mode: "create" → new campaign via campaign_push
           "append" → add leads to existing_campaign_id via smartlead_add_leads
+    include_domains: Phase 0 — override target lookup with specific domains (unused targets)
+    exclude_emails: Mode 3 — skip emails already in campaign
 
     Replaces 6+ separate tool calls. Eliminates all agent decisions post-classification.
     """
     config = config or _default_config()
     workspace = workspace or _default_workspace()
 
-    # 1. Load targets from run file
+    # 1. Load targets from run file or use include_domains (Phase 0)
     run_path = f"runs/{run_id}.json"
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
 
     companies = run_data.get("companies", {})
-    target_domains = [d for d, c in companies.items()
-                      if c.get("classification", {}).get("is_target")]
+
+    if include_domains:
+        target_domains = include_domains
+    else:
+        target_domains = [d for d, c in companies.items()
+                          if c.get("classification", {}).get("is_target")]
 
     if not target_domains:
         return {"success": False, "error": "No target companies found in run file"}
@@ -675,13 +866,23 @@ async def pipeline_people_to_push(
                 "classification", {}).get("segment", segment),
         })
 
+    # Filter out emails already in campaign (Mode 3 dedup)
+    if exclude_emails:
+        exclude_set = set(e.lower() for e in exclude_emails)
+        before = len(contacts)
+        contacts = [c for c in contacts if c["email"].lower() not in exclude_set]
+        logger.info("pipeline_people_to_push: deduped %d → %d contacts (excluded %d campaign emails)",
+                     before, len(contacts), before - len(contacts))
+
     people_credits = len(contacts)
-    search_credits = run_data.get("totals", {}).get("total_credits_search", 0)
     logger.info("pipeline_people_to_push: %d contacts enriched (%d credits)", len(contacts), people_credits)
 
-    # 4. Save contacts (atomic — both files + totals + kpi_met + people_extracted)
-    await pipeline_save_contacts(project, run_id, contacts, search_credits, people_credits,
+    # 4. Save contacts (atomic — credits computed FROM run file, not passed)
+    await pipeline_save_contacts(project, run_id, contacts, people_credits,
                                  workspace=workspace)
+
+    # Reload run_data after save_contacts updated totals
+    run_data = workspace.load(project, run_path) or run_data
 
     # 5. Google Sheet export (optional)
     sheet_url = ""
@@ -752,13 +953,21 @@ async def pipeline_people_to_push(
         }
         workspace.save(project, run_path, run_data)
 
+    # Read final totals from run file (authoritative after save_contacts)
+    final_totals = run_data.get("totals", {})
+
     return {
         "success": True,
         "data": {
             "targets": len(target_domains),
             "contacts": len(contacts),
             "people_credits": people_credits,
-            "total_credits": search_credits + people_credits,
+            "total_credits": final_totals.get("total_credits", 0),
+            "credits_breakdown": final_totals.get("credits_breakdown", {
+                "probe": final_totals.get("total_credits_probe", 0),
+                "search": final_totals.get("total_credits_search", 0),
+                "people": people_credits,
+            }),
             "kpi_met": len(contacts) >= run_data.get("kpi", {}).get("target_people", 100),
             "campaign_id": campaign_id,
             "campaign_slug": campaign_slug,
