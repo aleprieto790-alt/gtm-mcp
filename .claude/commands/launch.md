@@ -786,7 +786,10 @@ Agent(
 # Orchestrator merges — NOT agents. Zero race condition.
 all_classified = {}
 for i in range(1, num_agents + 1):
+  # Try with .json first, then without (agents sometimes drop the extension)
   chunk = load_data(project, f"tmp/classify_chunk_{i}.json")
+  if not chunk.success:
+    chunk = load_data(project, f"tmp/classify_chunk_{i}")
   if chunk.success:
     all_classified.update(chunk.data)
     
