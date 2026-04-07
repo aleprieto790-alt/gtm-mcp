@@ -85,13 +85,8 @@ async def sheets_create(
         sheet_id = created["id"]
         sheet_url = created.get("webViewLink", f"https://docs.google.com/spreadsheets/d/{sheet_id}")
 
-        # Write headers to first row
-        sheets_svc.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range="Sheet1!A1",
-            valueInputOption="RAW",
-            body={"values": [CONTACT_HEADERS]},
-        ).execute()
+        # Headers written later by sheets_export_contacts (after dynamic column filtering)
+        # Only set formatting here — bold + freeze row 1
 
         # Bold + freeze header row
         sheets_svc.spreadsheets().batchUpdate(
