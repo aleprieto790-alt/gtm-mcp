@@ -334,40 +334,35 @@ save_data(project, "project.yaml", {
 
 **CRITICAL: Generate at least `min_keywords` keywords (from Dynamic Scaling section).** Keywords are FREE (LLM generation). Each keyword fires a separate Apollo request discovering different companies. More keywords = more unique companies. The cost is per-page (1 credit each), but most keywords exhaust in 1 page. The `max_companies` cap stops gathering long before all keywords are used. For KPI=100 at 77% target rate: ~30 keywords. For KPI=200 at 40%: ~88 keywords. Always scale to KPI.
 
-**Probe (6 credits max) — ALL calls in parallel:**
+**Probe — ONE deterministic tool call (6 credits max):**
 ```
-# Fire all 6 Apollo requests in ONE message (parallel execution):
-apollo_search_companies({organization_industry_tag_ids: [tag_id_1], ...})
-apollo_search_companies({organization_industry_tag_ids: [tag_id_2], ...})
-apollo_search_companies({organization_industry_tag_ids: [tag_id_3], ...})
-apollo_search_companies({q_organization_keyword_tags: [keyword_1], ...})
-apollo_search_companies({q_organization_keyword_tags: [keyword_2], ...})
-apollo_search_companies({q_organization_keyword_tags: [keyword_3], ...})
+probe_result = pipeline_probe(
+  project=project_slug,
+  run_id=run_id,
+  keywords=keywords[:3],
+  industry_tag_ids=industry_tag_ids[:3],
+  locations=locations,
+  employee_ranges=employee_ranges,
+  funding_stages=funding_stages,
+  max_sample=20,
+)
 ```
-ALL 6 calls in ONE message = parallel. Do NOT call them sequentially.
+**This ONE call does EVERYTHING**: 6 Apollo searches in parallel + batch scrape of ~20 companies.
+Returns: breakdown per filter, scraped_texts for classification, total_available per keyword.
+Saves probe companies + scraped data to run file automatically.
 
-Collect probe_breakdown: companies per filter, total available.
-Dedup probe results by domain → `probe_companies` list.
-
-**Probe classification (0 credits — ONE batch scrape call):**
-
-Pick ~15-20 companies from probe results (mix of keyword and industry streams, skip obvious giants):
+**Then classify probe results (LLM — the ONLY non-deterministic part of probe):**
 ```
-# ONE deterministic batch call — scrapes all URLs in parallel internally:
-urls = [f"https://{c.domain}" for c in probe_companies[:20]]
-batch_result = scrape_batch(urls=urls)
-
-# Then classify from batch_result.data.results (each has .text if successful)
-→ Classify using company-qualification skill (via negativa)
-→ Record: is_target, confidence, segment, reasoning
+# Classify from probe_result.data.scraped_texts
+For each domain, text in probe_result.data.scraped_texts:
+  → Classify using company-qualification skill (via negativa)
+  → Record: is_target, confidence, segment, reasoning
 ```
-**NEVER call scrape_website in a loop.** Always use `scrape_batch` for multiple URLs.
-15-20 URLs scraped in ~3 seconds via one tool call, not 15-20 sequential calls taking 2+ minutes.
 
 Calculate `probe_target_rate` = targets / scraped_successfully.
-This is the REAL target rate from actual data — not a guess.
 
-**CRITICAL: Keep probe results for the main pipeline.** Probe companies are already scraped and classified — don't discard them. Save them so `pipeline_gather_and_scrape` deduplicates against them (won't re-fetch), and probe targets flow directly into people enrichment. 6 credits already spent on probe = 6 credits of usable data.
+**Zero duplication**: `pipeline_gather_and_scrape` loads probe companies from the run file
+into `seen_domains` at startup → skips them entirely. No re-fetching, no re-scraping.
 
 ```
 # Save probe results to run file immediately

@@ -19,6 +19,157 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+async def pipeline_probe(
+    keywords: list[str],
+    industry_tag_ids: list[str],
+    locations: list[str],
+    employee_ranges: list[str],
+    funding_stages: list[str] | None = None,
+    max_sample: int = 20,
+    *,
+    project: str,
+    run_id: str,
+    config=None,
+    workspace=None,
+) -> dict:
+    """Deterministic probe — 6 Apollo searches + batch scrape in ONE call.
+
+    Replaces: 6 agent apollo_search_companies calls + 1 scrape_batch call.
+    Fires up to 3 keyword + 3 industry searches (page 1 only, 6 credits max).
+    Scrapes ~20 sample companies. Saves everything to run file.
+
+    Returns: breakdown per filter, scraped_texts for agent classification,
+    total_available per filter (for cost estimation).
+
+    After this, pipeline_gather_and_scrape will auto-skip probe companies
+    (they're already in the run file → loaded into seen_domains).
+    """
+    config = config or _default_config()
+    workspace = workspace or _default_workspace()
+    api_key = config.get("apollo_api_key")
+    apify_key = config.get("apify_proxy_password")
+    if not api_key:
+        return {"success": False, "error": "apollo_api_key not configured"}
+
+    from gtm_mcp.tools.apollo import apollo_search_companies
+    from gtm_mcp.tools.scraping import scrape_batch
+
+    # 1. Fire up to 6 Apollo searches in parallel (3 keywords + 3 industries)
+    probe_keywords = keywords[:3]
+    probe_industries = industry_tag_ids[:3]
+    seen = set()
+    all_companies: dict[str, dict] = {}
+    breakdown = []
+    credits_used = 0
+
+    async def search_one(filter_type, filter_value):
+        nonlocal credits_used
+        filters = {
+            "organization_locations": locations,
+            "organization_num_employees_ranges": employee_ranges,
+        }
+        if filter_type == "keyword":
+            filters["q_organization_keyword_tags"] = [filter_value]
+        else:
+            filters["organization_industry_tag_ids"] = [filter_value]
+        if funding_stages:
+            filters["organization_latest_funding_stage_cd"] = funding_stages
+
+        result = await apollo_search_companies(api_key, filters, page=1, per_page=100)
+        credits_used += 1
+        if not result.get("success"):
+            return {"type": filter_type, "name": filter_value, "total": 0, "companies": 0}
+
+        raw = result.get("companies", [])
+        total_available = result.get("total_entries", result.get("pagination", {}).get("total_entries", len(raw)))
+        new_count = 0
+        for c in raw:
+            domain = c.get("primary_domain", "") or c.get("domain", "")
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            new_count += 1
+            all_companies[domain] = {
+                "domain": domain,
+                "name": c.get("name", ""),
+                "apollo_id": c.get("apollo_id", "") or c.get("id", ""),
+                "apollo_data": {
+                    "industry": c.get("industry", ""),
+                    "industry_tag_id": c.get("industry_tag_id", ""),
+                    "employee_count": c.get("employee_count"),
+                    "employee_range": c.get("employee_range", ""),
+                    "country": c.get("country", ""),
+                    "city": c.get("city", ""),
+                    "state": c.get("state", ""),
+                    "founded_year": c.get("founded_year"),
+                    "linkedin_url": c.get("linkedin_url", ""),
+                    "short_description": c.get("short_description", ""),
+                    "funding_stage": c.get("funding_stage", ""),
+                    "revenue": c.get("revenue", ""),
+                },
+                "discovery": {"found_by": f"{filter_type}:{filter_value}", "probe": True},
+            }
+        return {"type": filter_type, "name": filter_value, "total": total_available, "companies": new_count}
+
+    tasks = []
+    for kw in probe_keywords:
+        tasks.append(search_one("keyword", kw))
+    for tid in probe_industries:
+        tasks.append(search_one("industry", tid))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, dict):
+            breakdown.append(r)
+
+    # 2. Scrape sample companies (deterministic batch)
+    sample_domains = list(all_companies.keys())[:max_sample]
+    scraped_texts = {}
+    if sample_domains:
+        urls = [f"https://{d}" for d in sample_domains]
+        scrape_result = await scrape_batch(urls, apify_proxy_password=apify_key, max_concurrent=20)
+        if scrape_result.get("success"):
+            for entry in scrape_result.get("data", {}).get("results", []):
+                if entry.get("success") and entry.get("url"):
+                    domain = entry["url"].replace("https://", "").replace("http://", "").rstrip("/")
+                    scraped_texts[domain] = (entry.get("text", ""))[:3000]
+
+    # 3. Save to run file (so gather phase skips these domains)
+    if workspace and project and run_id:
+        run_path = f"runs/{run_id}.json"
+        run_data = workspace.load(project, run_path) or {}
+        run_data["probe"] = {
+            "credits_used": credits_used,
+            "companies_from_probe": len(all_companies),
+            "breakdown": breakdown,
+        }
+        run_data["companies"] = {**run_data.get("companies", {}), **{
+            d: {**c, "scrape": {
+                "status": "success" if d in scraped_texts else "not_scraped",
+                "text_length": len(scraped_texts.get(d, "")),
+            }} for d, c in all_companies.items()
+        }}
+        # Set probe credits in totals
+        run_data["totals"] = {
+            **run_data.get("totals", {}),
+            "total_credits_probe": credits_used,
+            "total_credits": credits_used,
+        }
+        workspace.save(project, run_path, run_data)
+
+    return {
+        "success": True,
+        "data": {
+            "credits_used": credits_used,
+            "companies_found": len(all_companies),
+            "companies_scraped": len(scraped_texts),
+            "breakdown": breakdown,
+            "scraped_texts": scraped_texts,
+            "sample_domains": sample_domains,
+        },
+    }
+
+
 async def pipeline_gather_and_scrape(
     keywords: list[str],
     industry_tag_ids: list[str],
@@ -68,6 +219,15 @@ async def pipeline_gather_and_scrape(
         elif bl_data and isinstance(bl_data, list):
             seen_domains.update(bl_data)
             logger.info("Loaded %d blacklisted domains for project %s", len(bl_data), project)
+    # Load existing companies from run file (probe phase saves here first)
+    # This prevents re-discovering + re-scraping probe companies
+    if workspace and project and run_id:
+        existing_run = workspace.load(project, f"runs/{run_id}.json")
+        if existing_run and isinstance(existing_run.get("companies"), dict):
+            existing_domains = set(existing_run["companies"].keys())
+            seen_domains.update(existing_domains)
+            logger.info("Loaded %d existing domains from run file (probe/previous)", len(existing_domains))
+
     companies: dict[str, dict] = {}
     requests: list[dict] = []
     scrape_queue: asyncio.Queue = asyncio.Queue()

@@ -343,7 +343,73 @@ async def scrape_batch(urls: list[str], max_concurrent: int = 50) -> dict:
     return await _impl(urls, apify_proxy_password=proxy, max_concurrent=max_concurrent)
 
 
+# ─── Assignment Tools ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def assign_campaigns_to_projects(
+    campaigns: list[dict], accounts: list[dict],
+) -> dict:
+    """Auto-assign SmartLead campaigns to projects. Deterministic — zero LLM.
+
+    Three-tier matching (ported from magnum-opus):
+    1. Saved rules (project_rules.json) — tag, prefix, contains match
+    2. Sender domain grouping — campaigns sharing email account domains
+    3. Campaign name prefix grouping — common prefixes before " - "
+
+    Input: campaigns from smartlead_list_campaigns + smartlead_get_campaign,
+           accounts from smartlead_list_accounts cache.
+    Output: grouped projects with features for agent to name/validate.
+    """
+    from gtm_mcp.tools.assignment import assign_campaigns as _impl
+    return _impl(campaigns, accounts, _workspace.base)
+
+
+@mcp.tool()
+async def learn_assignment_correction(
+    project_slug: str, project_name: str, campaign_name: str,
+    sender_domains: list[str] | None = None,
+    sender_names: list[str] | None = None,
+) -> dict:
+    """Learn from user correction — update project_rules.json.
+
+    Called when user says "move campaign X to project Y" or confirms assignment.
+    Extracts patterns and saves rules for future auto-assignment.
+    """
+    from gtm_mcp.tools.assignment import learn_correction as _impl
+    return _impl(_workspace.base, project_slug, project_name, campaign_name,
+                 sender_domains, sender_names)
+
+
 # ─── Pipeline Tools ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def pipeline_probe(
+    project: str,
+    run_id: str,
+    keywords: list[str],
+    industry_tag_ids: list[str],
+    locations: list[str],
+    employee_ranges: list[str],
+    funding_stages: list[str] | None = None,
+    max_sample: int = 20,
+) -> dict:
+    """Deterministic probe — 6 Apollo searches + batch scrape in ONE call.
+
+    Replaces 6 agent apollo_search_companies calls + 1 scrape_batch call.
+    Fires up to 3 keywords + 3 industries (page 1, 6 credits max).
+    Scrapes ~20 sample companies. Saves probe data + companies to run file.
+
+    Returns scraped_texts for agent to classify (compute target_rate).
+    After this, pipeline_gather_and_scrape auto-skips probe companies.
+    """
+    from gtm_mcp.tools.pipeline import pipeline_probe as _impl
+    return await _impl(
+        keywords, industry_tag_ids, locations, employee_ranges,
+        funding_stages=funding_stages, max_sample=max_sample,
+        project=project, run_id=run_id,
+        config=_config, workspace=_workspace,
+    )
+
 
 @mcp.tool()
 async def campaign_push(
