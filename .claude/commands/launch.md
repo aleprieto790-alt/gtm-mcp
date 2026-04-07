@@ -1258,8 +1258,11 @@ Campaign Ready (DRAFT) — Checkpoint 2:
     → Say "add {unused_contacts} more" to harvest for free
 
   KEYWORDS — {never_fired_count} never-fired, {has_more_pages_count} with more pages:
-    Full list: ~/.gtm-mcp/projects/{project_slug}/runs/{run_id}.json → filter_snapshots[0].filters.keywords
+    Full list: ~/.gtm-mcp/projects/{project_slug}/campaigns/{active_campaign_slug}/runs/{run_id}.json → filter_snapshots[0].filters.keywords
+    Fired: {fired_keywords_list}
     Top unused: {top_5_never_fired_keywords}
+
+  **IMPORTANT: ALWAYS show the full keyword file path above. The user needs it to review and plan continuation runs.**
 
   Type "activate" to start sending.
 ```

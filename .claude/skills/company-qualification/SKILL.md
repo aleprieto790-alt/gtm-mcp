@@ -79,7 +79,9 @@ For EACH company, return:
 
 ### Reasoning Quality — MUST cite website evidence
 
-**The reasoning field is a PARAGRAPH (3-5 sentences), not a label restatement.**
+**The reasoning field is a PARAGRAPH (3-5 sentences, minimum 100 characters), not a label restatement.**
+
+**HARD MINIMUM: 100 characters.** Anything shorter is rejected. If you can't write 100 chars of reasoning, you didn't read the website text. This is non-negotiable — the reasoning appears in the Google Sheet for human review. Short labels like "B2B payments" or "Payment gateway" are useless to the user.
 
 It MUST include:
 1. **What the company does** — cite specific phrases from the scraped website text
@@ -87,10 +89,10 @@ It MUST include:
 3. **Why target/non-target** — explain the buyer logic (or exclusion reason)
 4. **Confidence justification** — if borderline, say what's uncertain
 
-**GOOD reasoning** (specific, evidence-grounded):
+**GOOD reasoning** (specific, evidence-grounded, 250+ chars):
 > "Their website describes PayFlex as an 'enterprise payment orchestration platform' offering APIs for multi-acquirer routing. The developer docs page and enterprise pricing tiers confirm B2B infrastructure. They serve merchants processing 10K+ transactions/day — exactly the buyer profile for outbound pipeline services."
 
-**BAD reasoning** (generic label — NEVER do this):
+**BAD reasoning** (generic label — NEVER do this, WILL BE REJECTED):
 > "B2B payment processing company operating in PAYMENTS segment."
 
 **BAD reasoning** (hallucinated — NEVER do this):
@@ -165,7 +167,7 @@ INCLUSION SIGNALS (what makes a company a TARGET):
 4. Growing company (funding, hiring, expanding)
 
 CLASSIFY from the WEBSITE TEXT (not Apollo labels).
-Return JSON: {"is_target": bool, "confidence": 0-100, "segment": "CAPS_LABEL", "reasoning": "3-5 sentences citing website evidence"}
+Return JSON: {"is_target": bool, "confidence": 0-100, "segment": "CAPS_LABEL", "reasoning": "MINIMUM 100 chars, 3-5 sentences citing website evidence. Quote specific products/features from the scraped text."}
 For targets: segment = one of {segment_labels}
 For non-targets: segment = what the company ACTUALLY IS (COMPETITOR, RESTAURANT, etc.)
 ```
@@ -245,7 +247,7 @@ Every classified company must track:
 - `is_target`: bool
 - `confidence`: 0-100
 - `segment`: CAPS_SNAKE_CASE label
-- `reasoning`: 3-5 sentences citing website evidence
+- `reasoning`: 3-5 sentences citing website evidence **(MINIMUM 100 characters — shorter is rejected)**
 
 ## Iteration Lifecycle
 
