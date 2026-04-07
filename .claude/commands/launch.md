@@ -139,7 +139,7 @@ Free text:
         sending_account_ids: from SmartLead, segment: from user input,
         run_ids: [], total_leads_pushed: existing lead count
       })
-    → If user provided offer URL (e.g. inxy.io), scrape and save to project.yaml
+    → If user provided offer URL (e.g. acme.io), scrape and save to project.yaml
     → Now proceed as normal Mode 3 (local data exists)
   
   Call smartlead_get_campaign(campaign_id) → verify not STOPPED.
@@ -188,9 +188,9 @@ Free text:
    → NEVER default to "US" silently. NEVER proceed without geo confirmation.
 ```
 
-**This is a HARD REQUIREMENT. Do NOT proceed to filter generation without geo confirmation from the user.** Run #5 (inxy) wasted 65 credits because geo was wrong — website said "Excl. US, UK" but agent searched IN US and UK.
+**This is a HARD REQUIREMENT. Do NOT proceed to filter generation without geo confirmation from the user.** WARNING: Past runs wasted significant credits because geo was wrong — website listed exclusions but the agent searched IN those excluded regions.
 
-**Run #5 (inxy) failed catastrophically here**: website said "Excl. sanctioned countries, UK and US" but agent searched IN US and UK. 14 of 22 contacts were US/UK-based — completely unusable. This wasted 65 credits on wrong-geo contacts.
+**WARNING:** If the website says "Excl. {countries}" but the agent searches IN those countries, the resulting contacts will be completely unusable. This wastes both search and people credits on wrong-geo contacts.
 
 **Mode 3 (append to existing campaign):**
 - **Accounts**: skip question IF campaign already has accounts assigned. Otherwise ask.
@@ -741,7 +741,7 @@ Keeps project root clean. `tmp/` is kept for debugging, never auto-deleted.
 
 **CRITICAL: Each agent writes to its OWN chunk file, NOT the run file.**
 
-Run #3 lost 45 of 73 targets because 4 agents wrote to the same run file concurrently.
+WARNING: Past runs lost the majority of targets because multiple agents wrote to the same run file concurrently.
 Race condition: last agent overwrites chunks 1-3. Only chunk 4 survives.
 
 **For each agent N, spawn in parallel:**
@@ -824,7 +824,7 @@ Record: `round.timestamps.classify_completed = "{now}"`
 result = pipeline_people_to_push(
   project=project_slug,
   run_id=run_id,
-  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Sally Fintech PAYMENTS 07/04"
+  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Acme SaaS PAYMENTS 07/04"
   sending_account_ids=selected_account_ids,
   country=country_code,
   segment=segment_name,
@@ -863,7 +863,7 @@ If credits_used >= max_credits → STOP with warning
 If not enough targets → next keyword batch (Round 2)
 ```
 
-**CRITICAL: Save EVERYTHING to the run file.** Test Run #1 failed because contacts and campaign data weren't saved.
+**CRITICAL: Save EVERYTHING to the run file.** WARNING: Past runs failed because contacts and campaign data weren't saved.
 
 ```
 # 1. Mark enriched companies (so Phase 0 knows which targets are "used")
@@ -1031,7 +1031,7 @@ pipeline_save_contacts(
 
 **NEVER save contacts manually with save_data.** NEVER save contacts.json separately.
 This ONE call handles: contacts.json + run file contacts + totals.total_credits + totals.kpi_met.
-Fixes Run #1 (0 contacts in run file), Run #2 (0 contacts), Run #4 (OK but fragile), Run #5 (0 contacts).
+Past runs showed 0 contacts in the run file when contacts were saved manually instead of using this tool.
 
 ```
 save_data(project, "state.yaml", {
@@ -1098,9 +1098,9 @@ Update state: `save_data(project, "state.yaml", {..., current_phase: "campaign_p
 **Format: `{project_name} {segment_name} {DD/MM}`**
 
 Examples:
-- "Sally Fintech PAYMENTS 07/04"
-- "Inxy Affiliate NETWORKS 07/04"
-- "EasyStaff LENDING 15/03"
+- "{project_name} {segment_name} DD/MM" — e.g. "Acme SaaS PAYMENTS 07/04"
+- "{project_name} {segment_name} DD/MM" — e.g. "BetaPay NETWORKS 07/04"
+- "{project_name} {segment_name} DD/MM" — e.g. "EasyStaff LENDING 15/03"
 
 NEVER use generic names like "Fintech — Global" or "Campaign 1".
 
@@ -1116,7 +1116,7 @@ save_data(project, "leads_for_push.json", all_leads_array)
 # ONE tool call: create → sequence → upload all leads → test email
 result = campaign_push(
   project=project_slug,
-  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Inxy Affiliate NETWORKS 07/04"
+  campaign_name="{project_name} {segment_name} {DD/MM}",  # e.g. "Acme SaaS PAYMENTS 07/04"
   sending_account_ids=selected_account_ids,
   country=country_code,
   segment=segment_name,
@@ -1155,11 +1155,11 @@ save_data(project, f"runs/{run_id}.json", {
 }, mode="merge")
 ```
 
-**Run #5 (inxy) failed here**: leads uploaded to SmartLead (452 correct) but campaign.yaml still shows 430 and run_ids=[].
+**WARNING:** Past runs showed leads uploaded to SmartLead successfully but campaign.yaml not updated (stale lead count and empty run_ids=[]).
 
 ### Update tracking — ALL THREE files must be updated
 
-**CRITICAL: Test Run #1 failed here — agent didn't update run file or campaign.yaml after push.**
+**CRITICAL: Past runs failed here — agent didn't update run file or campaign.yaml after push.**
 
 ```
 # 1. Update campaign.yaml with run link + lead count

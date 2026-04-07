@@ -403,6 +403,8 @@ async def apollo_enrich_companies(api_key: str, domains: list[str]) -> dict:
             continue
 
         for org in data.get("organizations") or []:
+            if org is None:
+                continue  # Apollo returns null for unknown domains
             total_credits += 1
 
             if org.get("industry_tag_id") and org.get("industry"):
