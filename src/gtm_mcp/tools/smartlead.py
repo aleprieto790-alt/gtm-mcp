@@ -297,12 +297,11 @@ async def smartlead_list_accounts(*, config=None, workspace=None) -> dict:
 # Search email accounts — filters from local cache
 # ---------------------------------------------------------------------------
 
-async def smartlead_search_accounts(query: str, project: str = "", *, config=None, workspace=None) -> dict:
+async def smartlead_search_accounts(query: str, project: str = "", campaign_slug: str = "", *, config=None, workspace=None) -> dict:
     """Search cached email accounts by name, email, or domain substring.
 
     Call smartlead_list_accounts() first to populate the cache.
-    Pass project to save selected accounts to project dir. If omitted, saves to global cache dir.
-    Final per-campaign storage happens in smartlead_create_campaign.
+    Pass project + campaign_slug to save directly to campaigns/{slug}/selected_accounts.json.
     """
     config = config or _default_config()
     workspace = workspace or _default_workspace()
@@ -334,12 +333,14 @@ async def smartlead_search_accounts(query: str, project: str = "", *, config=Non
         domain = email.split("@")[1] if "@" in email else "unknown"
         by_domain.setdefault(domain, []).append(a)
 
-    # Save matched accounts — per-project if project given, otherwise global cache dir
-    if project:
+    # Save matched accounts — campaign > project > global (most specific wins)
+    if project and campaign_slug:
+        selected_path = workspace.base / "projects" / project / "campaigns" / campaign_slug / "selected_accounts.json"
+    elif project:
         selected_path = workspace.base / "projects" / project / "selected_accounts.json"
-        selected_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         selected_path = workspace.base / "selected_accounts.json"
+    selected_path.parent.mkdir(parents=True, exist_ok=True)
     import json as _json
     selected_path.write_text(_json.dumps({
         "query": query, "count": len(matched),
@@ -484,20 +485,6 @@ async def smartlead_create_campaign(
         "created_at": datetime.now(tz.utc).isoformat(),
     }
     workspace.save(project, f"campaigns/{slug}/campaign.yaml", campaign_data)
-
-    # Save selected accounts to campaign dir — full details, not just IDs.
-    # Load from project-level selected_accounts.json (populated by smartlead_search_accounts)
-    # and filter to only the IDs used for this campaign.
-    import json as _json
-    project_accounts_path = workspace.base / "projects" / project / "selected_accounts.json"
-    if project_accounts_path.exists():
-        all_selected = _json.loads(project_accounts_path.read_text())
-        campaign_accounts = [a for a in all_selected.get("accounts", [])
-                             if a.get("id") in desired_ids]
-        workspace.save(project, f"campaigns/{slug}/selected_accounts.json", {
-            "count": len(campaign_accounts),
-            "accounts": campaign_accounts,
-        })
 
     result = {"success": True, "data": campaign_data}
     if setup_warnings:

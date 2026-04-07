@@ -140,28 +140,31 @@ async def sheets_export_contacts(
     config = config or _default_config()
     workspace = workspace or _default_workspace()
 
-    # Load contacts
-    contacts = workspace.load(project, "contacts.json")
-    if not contacts:
-        return {"success": False, "error": f"No contacts.json in project {project}"}
-
-    # Filter by campaign segment if provided
+    # Load contacts — campaign-level first, fall back to project-level
+    contacts = None
     campaign_data = None
     if campaign_slug:
+        contacts = workspace.load(project, f"campaigns/{campaign_slug}/contacts.json")
         campaign_data = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml")
-        if campaign_data and campaign_data.get("segment"):
-            segment = campaign_data["segment"]
-            contacts = [c for c in contacts if c.get("segment") == segment]
-
     if not contacts:
-        return {"success": False, "error": "No contacts match the filter"}
+        contacts = workspace.load(project, "contacts.json")  # legacy fallback
+        if contacts and campaign_data and campaign_data.get("segment"):
+            contacts = [c for c in contacts if c.get("segment") == campaign_data["segment"]]
+    if not contacts:
+        return {"success": False, "error": f"No contacts found for {campaign_slug or project}"}
 
     # Join with run file companies to get classification + apollo_data
     company_data: dict[str, dict] = {}  # domain → {apollo_data, classification}
     run_ids = (campaign_data or {}).get("run_ids", [])
+    if not run_ids and campaign_slug:
+        # Scan campaign-level runs
+        campaign_runs_dir = workspace._project_dir(project) / "campaigns" / campaign_slug / "runs"
+        if campaign_runs_dir.exists():
+            run_files = sorted(campaign_runs_dir.glob("run-*.json"))
+            if run_files:
+                run_ids = [rf.stem for rf in run_files]
     if not run_ids:
-        # Scan for latest run file
-        import os
+        # Legacy: scan project-level runs
         runs_dir = workspace._project_dir(project) / "runs"
         if runs_dir.exists():
             run_files = sorted(runs_dir.glob("run-*.json"))
@@ -169,7 +172,12 @@ async def sheets_export_contacts(
                 run_ids = [run_files[-1].stem]
 
     for run_id in run_ids:
-        run_data = workspace.load(project, f"runs/{run_id}.json")
+        # Try campaign-level first, then project-level
+        run_data = None
+        if campaign_slug:
+            run_data = workspace.load(project, f"campaigns/{campaign_slug}/runs/{run_id}.json")
+        if not run_data:
+            run_data = workspace.load(project, f"runs/{run_id}.json")
         if run_data and isinstance(run_data.get("companies"), dict):
             for domain, comp in run_data["companies"].items():
                 cls = comp.get("classification", {})

@@ -48,6 +48,25 @@ def _recover_run_data(run_data: dict) -> dict:
     return run_data
 
 
+def _campaign_path(base: str, campaign_slug: str = "") -> str:
+    """Route project-relative paths under campaigns/{slug}/ when campaign_slug provided.
+
+    runs/run-001.json       → campaigns/{slug}/runs/run-001.json
+    contacts.json           → campaigns/{slug}/contacts.json
+    leads_for_push.json     → campaigns/{slug}/leads_for_push.json
+    blacklist.json          → blacklist.json  (stays project-level)
+    project.yaml            → project.yaml    (stays project-level)
+    campaigns/…             → campaigns/…     (already scoped)
+    """
+    if not campaign_slug:
+        return base
+    if base.startswith("runs/"):
+        return f"campaigns/{campaign_slug}/{base}"
+    if base in ("contacts.json", "leads_for_push.json"):
+        return f"campaigns/{campaign_slug}/{base}"
+    return base
+
+
 async def pipeline_probe(
     keywords: list[str],
     industry_tag_ids: list[str],
@@ -55,6 +74,7 @@ async def pipeline_probe(
     employee_ranges: list[str],
     funding_stages: list[str] | None = None,
     max_sample: int = 20,
+    campaign_slug: str = "",
     *,
     project: str,
     run_id: str,
@@ -177,7 +197,7 @@ async def pipeline_probe(
     }
 
     if workspace and project and run_id:
-        run_path = f"runs/{run_id}.json"
+        run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
         run_data = workspace.load(project, run_path) or {}
         run_data["probe"] = {
             "credits_used": credits_used,
@@ -227,6 +247,7 @@ async def pipeline_gather_and_scrape(
     max_pages_per_stream: int = 5,
     keyword_start_pages: dict[str, int] | None = None,
     max_credits: int | None = None,
+    campaign_slug: str = "",
     *,
     project: str,
     run_id: str,
@@ -273,12 +294,21 @@ async def pipeline_gather_and_scrape(
 
     if workspace and project:
         project_dir = workspace.base / "projects" / project
-        runs_dir = project_dir / "runs"
 
-        # Scan ALL run files to build complete seen_domains + keyword page history
-        if runs_dir.exists():
-            import json as _json
-            for rf in sorted(runs_dir.glob("run-*.json")):
+        # Scan ALL run files across ALL campaigns + legacy project-level runs
+        import json as _json
+        _all_run_files = []
+        # Campaign-level runs (new layout)
+        campaigns_dir = project_dir / "campaigns"
+        if campaigns_dir.exists():
+            _all_run_files.extend(sorted(campaigns_dir.glob("*/runs/run-*.json")))
+        # Legacy project-level runs (backward compat)
+        legacy_runs_dir = project_dir / "runs"
+        if legacy_runs_dir.exists():
+            _all_run_files.extend(sorted(legacy_runs_dir.glob("run-*.json")))
+
+        if _all_run_files:
+            for rf in _all_run_files:
                 try:
                     rd = _json.loads(rf.read_text())
                 except Exception:
@@ -304,7 +334,7 @@ async def pipeline_gather_and_scrape(
 
             if seen_domains:
                 logger.info("Loaded %d seen domains from %d run files, %d keyword start pages",
-                           len(seen_domains), len(list(runs_dir.glob("run-*.json"))),
+                           len(seen_domains), len(_all_run_files),
                            len(_auto_start_pages))
 
     companies: dict[str, dict] = {}
@@ -525,7 +555,7 @@ async def pipeline_gather_and_scrape(
     # PROTECTED: saves to BOTH "companies" AND "gather_companies" (survives agent overwrite)
     # Same pattern as probe_companies — agent can't destroy this data.
     if project and run_id and workspace:
-        run_path = f"runs/{run_id}.json"
+        run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
         existing_run = workspace.load(project, run_path) or {}
         existing_run["companies"] = response_companies
         existing_run["gather_companies"] = response_companies  # survives save_data(mode="write")
@@ -606,6 +636,7 @@ async def pipeline_gather_and_scrape(
 async def pipeline_compute_leaderboard(
     project: str,
     run_id: str,
+    campaign_slug: str = "",
     *,
     workspace=None,
 ) -> dict:
@@ -617,7 +648,7 @@ async def pipeline_compute_leaderboard(
     import math
     workspace = workspace or _default_workspace()
 
-    run_path = f"runs/{run_id}.json"
+    run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
@@ -734,6 +765,7 @@ async def pipeline_import_blacklist(
 async def pipeline_save_intelligence(
     project: str,
     run_id: str,
+    campaign_slug: str = "",
     *,
     workspace=None,
 ) -> dict:
@@ -744,7 +776,7 @@ async def pipeline_save_intelligence(
     """
     workspace = workspace or _default_workspace()
 
-    run_path = f"runs/{run_id}.json"
+    run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file not found"}
@@ -813,6 +845,7 @@ async def pipeline_save_contacts(
     run_id: str,
     contacts: list[dict],
     people_credits: int = 0,
+    campaign_slug: str = "",
     *,
     workspace=None,
     **_kwargs,  # absorb deprecated search_credits if agent passes it
@@ -826,14 +859,15 @@ async def pipeline_save_contacts(
     workspace = workspace or _default_workspace()
 
     # 1. Save contacts.json — MERGE with existing (don't overwrite on continuation runs)
-    existing_contacts = workspace.load(project, "contacts.json") or []
+    contacts_path = _campaign_path("contacts.json", campaign_slug)
+    existing_contacts = workspace.load(project, contacts_path) or []
     existing_emails = {c.get("email") for c in existing_contacts if c.get("email")}
     new_contacts = [c for c in contacts if c.get("email") not in existing_emails]
     merged = existing_contacts + new_contacts
-    workspace.save(project, "contacts.json", merged)
+    workspace.save(project, contacts_path, merged)
 
     # 2. Load run file, update contacts + totals, write back
-    run_path = f"runs/{run_id}.json"
+    run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
@@ -1176,7 +1210,7 @@ async def pipeline_people_to_push(
     workspace = workspace or _default_workspace()
 
     # 1. Load targets from run file or use include_domains (Phase 0)
-    run_path = f"runs/{run_id}.json"
+    run_path = _campaign_path(f"runs/{run_id}.json", campaign_slug)
     run_data = workspace.load(project, run_path)
     if not run_data:
         return {"success": False, "error": f"Run file {run_path} not found"}
@@ -1307,8 +1341,11 @@ async def pipeline_people_to_push(
     workspace.save(project, run_path, run_data)
 
     # 4. Save contacts (atomic — credits computed FROM run file, not passed)
+    # Derive campaign_slug early for saving contacts to campaign dir
+    import re as _re
+    _cs = _re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
     await pipeline_save_contacts(project, run_id, contacts, people_credits,
-                                 workspace=workspace)
+                                 campaign_slug=_cs, workspace=workspace)
 
     # Reload run_data after save_contacts updated totals
     run_data = workspace.load(project, run_path) or run_data
@@ -1352,7 +1389,7 @@ async def pipeline_people_to_push(
             "linkedin_url": c.get("linkedin_url", ""),
             "phone": c.get("phone", ""),
         })
-    workspace.save(project, "leads_for_push.json", leads)
+    workspace.save(project, _campaign_path("leads_for_push.json", campaign_slug), leads)
 
     # 7. Campaign push
     campaign_id = None

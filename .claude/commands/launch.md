@@ -162,13 +162,12 @@ Free text:
 **Check user input for:**
 ```
 1. Email accounts: look for "accounts with X", "use X accounts", sender name, domain hint
-   → If found: smartlead_list_accounts() + smartlead_search_accounts(hint, project=project_slug)
+   → If found: smartlead_list_accounts() + smartlead_search_accounts(hint, project=project_slug, campaign_slug=active_campaign_slug)
    → If NOT found: ASK "Which email accounts should I use? (e.g. 'accounts with Rinat')"
-   Pass project= if the project exists. Selected accounts are saved per-campaign when the
-   campaign is created (smartlead_create_campaign copies them to campaigns/{slug}/).
+   **ALWAYS pass project + campaign_slug** so accounts save directly to campaigns/{slug}/.
    
    **After selecting accounts, ALWAYS tell the user:**
-   "{N} accounts selected. Full list saved to selected_accounts.json — review if needed."
+   "{N} accounts selected. Saved to campaigns/{slug}/selected_accounts.json — review if needed."
    Show the domain breakdown from the tool response (by_domain field).
    Wait for user to confirm before proceeding. Do NOT continue silently.
 
@@ -219,8 +218,8 @@ save_data(project, "state.yaml", {
   mode: "fresh",                          # or "new_campaign" or "append"
   status: "running",
   current_phase: "offer_extraction",
-  active_campaign_slug: null,             # set in Step 7
-  active_campaign_id: null,               # set in Step 7
+  active_campaign_slug: "{project_slug}-{primary_segment_lower}-{MMDD}",  # set IMMEDIATELY — all data goes here
+  active_campaign_id: null,               # set in Step 7 (SmartLead ID)
   active_run_id: "run-001",
   phase_states: {
     offer_extraction: "pending",          # Mode 2/3: "skipped"
@@ -379,6 +378,7 @@ save_data(project, "project.yaml", {
 probe_result = pipeline_probe(
   project=project_slug,
   run_id=run_id,
+  campaign_slug=active_campaign_slug,
   keywords=keywords[:3],
   industry_tag_ids=industry_tag_ids[:3],
   locations=locations,
@@ -459,11 +459,11 @@ If user says "skip":
 
 **Create run file with ALL required fields:**
 ```
-save_data(project, "runs/run-001.json", {
+save_data(project, "campaigns/{active_campaign_slug}/runs/run-001.json", {
   run_id: "run-001",
   project: project_slug,
-  campaign_id: null,                    # set in Step 7
-  campaign_slug: null,                  # set in Step 7
+  campaign_id: null,                    # set in Step 7 (SmartLead ID)
+  campaign_slug: active_campaign_slug,  # set EARLY — same as state.yaml
   mode: "fresh",                        # or "append"
   status: "running",
   created_at: "{ISO timestamp}",
@@ -666,6 +666,7 @@ for entry in prev.keyword_leaderboard:
 result = pipeline_gather_and_scrape(
   project=project_slug,                # REQUIRED
   run_id=run_id,                       # REQUIRED
+  campaign_slug=active_campaign_slug,  # REQUIRED — runs saved under campaigns/{slug}/
   keywords=approved_keywords,          # min_keywords from Dynamic Scaling section
   industry_tag_ids=approved_tag_ids,   # 2-3 tag_ids from Step 2
   locations=approved_locations,
@@ -1030,6 +1031,7 @@ This has been broken in EVERY test run. The agent saves contacts.json but forget
 pipeline_save_contacts(
   project=project_slug,
   run_id=run_id,
+  campaign_slug=active_campaign_slug,
   contacts=all_contacts,
   people_credits=len(verified_contacts)  # 1 credit per verified contact
 )
@@ -1291,7 +1293,7 @@ For each unique keyword in run.requests[]:
 Sort by quality_score DESC.
 
 # 2. TWO deterministic tool calls — compute leaderboard + save intelligence
-pipeline_compute_leaderboard(project=project_slug, run_id=run_id)
+pipeline_compute_leaderboard(project=project_slug, run_id=run_id, campaign_slug=active_campaign_slug)
 pipeline_save_intelligence(project=project_slug, run_id=run_id)
 ```
 
