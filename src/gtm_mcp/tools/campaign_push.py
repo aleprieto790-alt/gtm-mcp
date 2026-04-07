@@ -83,16 +83,20 @@ async def campaign_push(
     all_leads = json.loads(leads_path.read_text())
     logger.info("Uploading %d leads from %s", len(all_leads), leads_file)
 
-    # Upload in chunks of 100 (SmartLead API limit per call)
+    # Single API call — SmartLead accepts full list. Retry on failure (upload is FREE).
     total_uploaded = 0
-    chunk_size = 100
-    for i in range(0, len(all_leads), chunk_size):
-        chunk = all_leads[i:i + chunk_size]
-        add_result = await smartlead_add_leads(campaign_id, chunk, config=config)
+    for attempt in range(3):
+        add_result = await smartlead_add_leads(campaign_id, all_leads, config=config)
         if add_result.get("success"):
-            total_uploaded += len(chunk)
-        else:
-            logger.warning("Chunk %d failed: %s", i // chunk_size, add_result.get("error"))
+            total_uploaded = len(all_leads)
+            break
+        logger.warning("Lead upload attempt %d failed: %s", attempt + 1, add_result.get("error"))
+        if attempt < 2:
+            import asyncio
+            await asyncio.sleep(3 * (attempt + 1))
+
+    if total_uploaded == 0:
+        logger.error("Lead upload FAILED after 3 attempts — %d leads lost", len(all_leads))
 
     logger.info("Uploaded %d/%d leads", total_uploaded, len(all_leads))
 

@@ -1362,10 +1362,17 @@ async def pipeline_people_to_push(
                 "step": "campaign_push", "contacts_saved": len(contacts)}
     elif mode == "append":
         from gtm_mcp.tools.smartlead import smartlead_add_leads
-        add_result = await smartlead_add_leads(existing_campaign_id, leads, config=config)
-        if add_result.get("success"):
-            campaign_id = existing_campaign_id
-            leads_uploaded = len(leads)
+        # Single API call with retry — SmartLead upload is FREE, never lose contacts
+        campaign_id = existing_campaign_id
+        leads_uploaded = 0
+        for attempt in range(3):
+            add_result = await smartlead_add_leads(existing_campaign_id, leads, config=config)
+            if add_result.get("success"):
+                leads_uploaded = len(leads)
+                break
+            if attempt < 2:
+                await asyncio.sleep(3 * (attempt + 1))
+        if leads_uploaded > 0:
             # Update campaign.yaml
             import re
             slug = re.sub(r"[^a-z0-9]+", "-", campaign_name.lower()).strip("-")
