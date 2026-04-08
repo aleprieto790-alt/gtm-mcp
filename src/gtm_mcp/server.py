@@ -391,14 +391,16 @@ async def pipeline_probe(
     locations: list[str],
     employee_ranges: list[str],
     funding_stages: list[str] | None = None,
-    max_sample: int = 20,
+    max_sample: int = 100,
+    campaign_slug: str = "",
 ) -> dict:
     """Deterministic probe — 6 Apollo searches + batch scrape in ONE call.
 
     Replaces 6 agent apollo_search_companies calls + 1 scrape_batch call.
     Fires up to 3 keywords + 3 industries (page 1, 6 credits max).
-    Scrapes ~20 sample companies. Saves probe data + companies to run file.
+    Scrapes all probe companies. Saves probe data + companies to run file.
 
+    campaign_slug: saves run file under campaigns/{slug}/runs/ when provided.
     Returns scraped_texts for agent to classify (compute target_rate).
     After this, pipeline_gather_and_scrape auto-skips probe companies.
     """
@@ -406,6 +408,7 @@ async def pipeline_probe(
     return await _impl(
         keywords, industry_tag_ids, locations, employee_ranges,
         funding_stages=funding_stages, max_sample=max_sample,
+        campaign_slug=campaign_slug,
         project=project, run_id=run_id,
         config=_config, workspace=_workspace,
     )
@@ -453,41 +456,41 @@ async def pipeline_import_blacklist(project: str, campaign_id: int) -> dict:
 
 
 @mcp.tool()
-async def pipeline_save_intelligence(project: str, run_id: str) -> dict:
+async def pipeline_save_intelligence(project: str, run_id: str, campaign_slug: str = "") -> dict:
     """Save cross-run intelligence from keyword leaderboard. Zero LLM.
 
     Updates filter_intelligence.json with keyword quality scores + segment playbooks.
     Call after pipeline_compute_leaderboard. Future runs start with proven keywords.
     """
     from gtm_mcp.tools.pipeline import pipeline_save_intelligence as _impl
-    return await _impl(project, run_id, workspace=_workspace)
+    return await _impl(project, run_id, campaign_slug=campaign_slug, workspace=_workspace)
 
 
 @mcp.tool()
-async def pipeline_compute_leaderboard(project: str, run_id: str) -> dict:
+async def pipeline_compute_leaderboard(project: str, run_id: str, campaign_slug: str = "") -> dict:
     """Compute keyword + industry leaderboard from run data. Zero LLM.
 
     For each keyword/industry: unique companies, targets, target rate, quality_score.
     Saves to run file's keyword_leaderboard. Used by Mode 3 for seeding.
     """
     from gtm_mcp.tools.pipeline import pipeline_compute_leaderboard as _impl
-    return await _impl(project, run_id, workspace=_workspace)
+    return await _impl(project, run_id, campaign_slug=campaign_slug, workspace=_workspace)
 
 
 @mcp.tool()
 async def pipeline_save_contacts(
     project: str, run_id: str, contacts: list[dict],
-    people_credits: int = 0,
+    people_credits: int = 0, campaign_slug: str = "",
 ) -> dict:
     """Deterministic save: contacts to BOTH contacts.json AND run file.
 
     Credits computed FROM run file (probe + search already saved by gather tool).
     total_credits = probe + search + people (always correct, agent can't mess it up).
-    Also marks people_extracted on companies for Phase 0 reuse.
+    campaign_slug: saves to campaigns/{slug}/ when provided.
     """
     from gtm_mcp.tools.pipeline import pipeline_save_contacts as _impl
     return await _impl(project, run_id, contacts, people_credits,
-                       workspace=_workspace)
+                       campaign_slug=campaign_slug, workspace=_workspace)
 
 
 @mcp.tool()
@@ -504,10 +507,12 @@ async def pipeline_gather_and_scrape(
     max_pages_per_stream: int = 5,
     keyword_start_pages: dict[str, int] | None = None,
     max_credits: int | None = None,
+    campaign_slug: str = "",
 ) -> dict:
     """Atomic gather + scrape pipeline — ONE tool call, full streaming inside.
 
     project + run_id REQUIRED — auto-saves companies + requests + round data to run file.
+    campaign_slug: saves run file under campaigns/{slug}/runs/ when provided.
     Fires all Apollo searches in parallel (1 keyword/industry per request).
     As domains arrive from Apollo, immediately queues them for scraping (100 concurrent Apify).
 
@@ -518,6 +523,7 @@ async def pipeline_gather_and_scrape(
     return await _impl(
         keywords, industry_tag_ids, locations, employee_ranges,
         funding_stages=funding_stages,
+        campaign_slug=campaign_slug,
         project=project, run_id=run_id,
         max_companies=max_companies,
         scrape_concurrent=scrape_concurrent,

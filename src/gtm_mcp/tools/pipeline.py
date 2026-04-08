@@ -1555,7 +1555,9 @@ async def pipeline_people_to_push(
             "last_name": c.get("last_name", ""),
             "company_name": c.get("company_name_normalized") or c.get("company_name") or c.get("company_domain", ""),
             "linkedin_url": c.get("linkedin_url", ""),
-            "phone": c.get("phone", ""),
+            "phone": c.get("phone") or "",
+            "company_domain": c.get("company_domain", ""),
+            "title": c.get("title", ""),
         })
     workspace.save(project, _campaign_path("leads_for_push.json", campaign_slug), leads)
 

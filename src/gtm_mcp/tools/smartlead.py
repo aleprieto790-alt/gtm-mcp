@@ -592,7 +592,7 @@ async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=Non
 
     from gtm_mcp.workspace import WorkspaceManager
 
-    # Format leads for SmartLead with normalized company names
+    # Format leads for SmartLead — map to default fields (not just custom_fields)
     lead_list = []
     for lead in leads:
         entry = {
@@ -602,8 +602,38 @@ async def smartlead_add_leads(campaign_id: int, leads: list[dict], *, config=Non
             "company_name": WorkspaceManager.normalize_company_name(
                 lead.get("company_name") or lead.get("company_name_normalized") or lead.get("company_domain", "")),
         }
+        # SmartLead default fields: linkedin, phone, website, location, company_url
+        # These show in "Basic Details" on lead page. custom_fields show under "Other Details".
+        linkedin = lead.get("linkedin_url") or lead.get("linkedin") or ""
+        if not linkedin and lead.get("custom_fields"):
+            linkedin = lead["custom_fields"].get("linkedin_url", "")
+        if linkedin:
+            entry["linkedin_profile"] = linkedin
+
+        phone = lead.get("phone") or lead.get("phone_number") or ""
+        if not phone and lead.get("custom_fields"):
+            phone = lead["custom_fields"].get("phone", "")
+        if phone:
+            entry["phone_number"] = str(phone)
+
+        website = lead.get("company_domain") or lead.get("website") or ""
+        if website and not website.startswith("http"):
+            website = f"https://{website}"
+        if website:
+            entry["company_url"] = website
+
+        # Custom fields: title, segment, city — anything not a SmartLead default
+        custom = {}
         if lead.get("custom_fields"):
-            entry["custom_fields"] = lead["custom_fields"]
+            custom = {k: v for k, v in lead["custom_fields"].items()
+                      if k not in ("linkedin_url", "phone")}  # already mapped above
+        # Add title from contact if not in custom_fields
+        title = lead.get("title") or custom.get("title", "")
+        if title:
+            custom["title"] = title
+        if custom:
+            entry["custom_fields"] = custom
+
         lead_list.append(entry)
 
     data = await _api_call("POST", f"/campaigns/{campaign_id}/leads", api_key,
