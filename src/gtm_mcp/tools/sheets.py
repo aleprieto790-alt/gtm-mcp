@@ -209,7 +209,10 @@ async def sheets_export_contacts(
     if not sheet_id:
         title = f"{project} — Contacts"
         if campaign_slug:
-            title = f"{campaign_slug} — Contacts"
+            # Use campaign name from campaign.yaml if available, otherwise slug
+            camp_data_for_title = workspace.load(project, f"campaigns/{campaign_slug}/campaign.yaml")
+            campaign_name_display = (camp_data_for_title or {}).get("name", campaign_slug)
+            title = f"{campaign_name_display} — Contacts"
         # Get user email for sharing
         user_email = config.get("user_email") or ""
         result = await sheets_create(title, share_with=user_email, config=config)

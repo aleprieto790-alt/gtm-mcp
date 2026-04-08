@@ -1692,7 +1692,10 @@ async def pipeline_people_to_push(
             "sheet_url": sheet_url,
             "mode": mode,
             "campaign_totals": campaign_totals,  # full breakdown across all runs
+            "ranked_unenriched": len(ids_to_save),
         },
+        "message": (f"{len(contacts)} contacts enriched, {leads_uploaded} uploaded to SmartLead. "
+                    f"{len(ids_to_save)} ranked people saved for future runs (ranked_unenriched.json)."),
     }
 
 
