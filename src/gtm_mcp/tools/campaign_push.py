@@ -70,8 +70,17 @@ async def campaign_push(
         return {"success": False, "error": f"Sequence setup failed: {seq_result.get('error')}",
                 "step": "set_sequence", "campaign_id": campaign_id}
 
-    # 3. Upload ALL leads from file
-    leads_path = workspace.base / "projects" / project.lower().replace(" ", "-") / leads_file
+    # 3. Upload ALL leads from file — check campaign-level, project-level, absolute
+    project_dir = workspace.base / "projects" / project.lower().replace(" ", "-")
+    leads_path = project_dir / leads_file
+    if not leads_path.exists():
+        # Try project-level fallback (agent may have saved there)
+        leads_path = project_dir / "leads_for_push.json"
+    if not leads_path.exists():
+        # Scan campaign dirs for any leads_for_push.json
+        for candidate in sorted(project_dir.glob("campaigns/*/leads_for_push.json")):
+            leads_path = candidate
+            break
     if not leads_path.exists():
         # Try absolute path
         from pathlib import Path

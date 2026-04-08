@@ -1523,7 +1523,7 @@ async def pipeline_people_to_push(
         from gtm_mcp.tools.campaign_push import campaign_push
         push_result = await campaign_push(
             project, campaign_name, sending_account_ids, country, segment,
-            sequence_steps, "leads_for_push.json", test_email, run_id=run_id,
+            sequence_steps, _campaign_path("leads_for_push.json", campaign_slug), test_email, run_id=run_id,
             config=config, workspace=workspace,
         )
         if push_result.get("success"):
