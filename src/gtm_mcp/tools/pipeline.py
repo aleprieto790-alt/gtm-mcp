@@ -993,7 +993,7 @@ async def pipeline_save_contacts(
     run_data = _recover_run_data(run_data)
 
     run_data["contacts"] = contacts
-    kpi_target = run_data.get("kpi", {}).get("target_people", 100)
+    kpi_target = run_data.get("kpi", {}).get("target_people", 5)
 
     # Mark companies that had people extracted (for Phase 0 reuse in future runs)
     enriched_domains = {c.get("company_domain") for c in contacts if c.get("company_domain")}
@@ -1393,7 +1393,7 @@ async def pipeline_people_to_push(
 
     # 3. Enrich ONLY enough for KPI — save the rest for future runs.
     # Enrichment yield ~70% (not all IDs produce verified emails).
-    kpi_target = run_data.get("kpi", {}).get("target_people", 100)
+    kpi_target = run_data.get("kpi", {}).get("target_people", 5)
     existing_contact_count = len(
         (workspace.load(project, _campaign_path("contacts.json", campaign_slug)) or [])
     )
@@ -1687,7 +1687,7 @@ async def pipeline_people_to_push(
                 "search": final_totals.get("total_credits_search", 0),
                 "people": people_credits,
             },
-            "kpi_met": len(contacts) >= run_data.get("kpi", {}).get("target_people", 100),
+            "kpi_met": len(contacts) >= run_data.get("kpi", {}).get("target_people", 5),
             "campaign_id": campaign_id,
             "campaign_slug": campaign_slug,
             "leads_uploaded": leads_uploaded,
