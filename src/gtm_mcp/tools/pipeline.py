@@ -73,7 +73,7 @@ async def pipeline_probe(
     locations: list[str],
     employee_ranges: list[str],
     funding_stages: list[str] | None = None,
-    max_sample: int = 20,
+    max_sample: int = 100,
     campaign_slug: str = "",
     *,
     project: str,
@@ -185,7 +185,41 @@ async def pipeline_probe(
                     domain = entry["url"].replace("https://", "").replace("http://", "").rstrip("/")
                     scraped_texts[domain] = (entry.get("text", ""))[:3000]
 
-    # 3. Save to run file (so gather phase skips these domains)
+    # 3. Deterministic heuristic classification — via negativa keyword exclusion.
+    # No LLM needed. Checks scraped text for exclusion signals to estimate target_rate.
+    # This replaces the agent's (unreliable) probe classification.
+    _EXCLUDE_SIGNALS = [
+        # B2C consumer
+        "personal finance", "consumer loan", "retail banking", "personal loan",
+        "credit score check", "savings account for individuals",
+        # Consulting/services
+        "consulting firm", "advisory services", "management consulting",
+        "professional services firm",
+        # Job boards / recruiting
+        "job board", "career opportunities", "recruiting platform", "talent acquisition platform",
+        # News / media
+        "news outlet", "magazine", "journalism", "media publication", "press release service",
+        # Government / education
+        "government agency", "public sector", "municipality", "university", "education platform",
+        # Too generic / not B2B
+        "personal blog", "portfolio website",
+    ]
+    probe_targets = 0
+    probe_classified = 0
+    for domain, text in scraped_texts.items():
+        if not text or len(text) < 100:
+            continue
+        probe_classified += 1
+        text_lower = text.lower()
+        excluded = any(sig in text_lower for sig in _EXCLUDE_SIGNALS)
+        if not excluded:
+            probe_targets += 1
+
+    estimated_target_rate = round(probe_targets / max(probe_classified, 1), 2)
+    logger.info("Probe heuristic: %d/%d scraped companies pass exclusion filter (%.0f%%)",
+                probe_targets, probe_classified, estimated_target_rate * 100)
+
+    # 4. Save to run file (so gather phase skips these domains)
     # Save probe companies under BOTH "companies" and "probe_companies" keys.
     # "probe_companies" survives even if agent later overwrites "companies" with mode="write".
     # pipeline_gather_and_scrape loads from BOTH to build seen_domains.
@@ -203,6 +237,9 @@ async def pipeline_probe(
             "credits_used": credits_used,
             "companies_from_probe": len(all_companies),
             "breakdown": breakdown,
+            "heuristic_target_rate": estimated_target_rate,
+            "heuristic_classified": probe_classified,
+            "heuristic_targets": probe_targets,
         }
         run_data["probe_companies"] = probe_companies_dict  # survives agent overwrite
         run_data["companies"] = {**run_data.get("companies", {}), **probe_companies_dict}
@@ -232,7 +269,13 @@ async def pipeline_probe(
             "breakdown": breakdown,
             "scraped_texts": scraped_texts,
             "sample_domains": sample_domains,
+            "heuristic_target_rate": estimated_target_rate,
+            "heuristic_classified": probe_classified,
+            "heuristic_targets": probe_targets,
         },
+        "message": (f"Probe: {len(all_companies)} companies, {len(scraped_texts)} scraped, "
+                    f"{credits_used} credits. Heuristic target rate: {probe_targets}/{probe_classified} "
+                    f"({estimated_target_rate:.0%}). Use this for Dynamic Scaling, NOT Apollo label counts."),
     }
 
 
