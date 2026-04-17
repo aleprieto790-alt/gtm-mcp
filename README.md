@@ -4,7 +4,7 @@ A set of skills and API wrappers that turn Claude Code into a full B2B cold emai
 
 Built by [GetSally](https://getsally.io), a B2B lead gen agency. The classification rules, filtering logic, and email patterns in this toolkit come from running thousands of outreach campaigns for 100+ B2B companies across the US, EU, and other markets – from early-stage startups to large enterprises. Our campaigns deliver 10–50 qualified leads per month. Used daily by our 20-person sales team. Now open source.
 
-For updates, follow [Rinat Khatipov on LinkedIn](https://www.linkedin.com/in/rinat-khatipov/).
+For updates, follow [Rinat Khatipov on LinkedIn](https://www.linkedin.com/in/rin-khat/).
 
 ---
 
