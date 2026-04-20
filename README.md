@@ -6,6 +6,8 @@ Built by [GetSally](https://getsally.io), a B2B lead gen agency. The classificat
 
 For updates, follow [Rinat Khatipov on LinkedIn](https://www.linkedin.com/in/rin-khat/).
 
+We have a [Slack workspace](https://gtm-mcpcommunity.slack.com/join/shared_invite/zt-3vxe2xpzl-21OYBEK~wIsRUlmmHDg8bg#/shared-invite/email) where you can ask questions, report bugs, request integrations, and share how you're using the toolkit.
+
 ---
 
 ## Requirements & flexibility
